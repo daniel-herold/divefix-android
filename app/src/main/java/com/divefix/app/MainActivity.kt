@@ -3,12 +3,14 @@ package com.divefix.app
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -109,6 +111,8 @@ class MainActivity : Activity() {
     private lateinit var fullImg: ImageView
     private lateinit var fullHint: TextView
     private lateinit var fileLabel: TextView
+    private lateinit var badge: TextView
+    private lateinit var removeBtn: Button
     private lateinit var spinner: Spinner
     private lateinit var bar: ProgressBar
     private lateinit var status: TextView
@@ -128,7 +132,16 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK); scaleType = ImageView.ScaleType.FIT_CENTER; contentDescription = "Preview, tap for full screen"
             setOnClickListener { openFull() }
         }
-        root.addView(preview, LinearLayout.LayoutParams(MATCH_PARENT, (resources.displayMetrics.heightPixels * .36f).toInt()))
+        badge = TextView(this).apply {
+            text = "✓ Fixed copy exists"; setTextColor(Color.WHITE); textSize = 13f; setPadding(pad, pad / 3, pad, pad / 3); visibility = View.GONE
+            background = GradientDrawable().apply { setColor(0xE01F7A8C.toInt()); cornerRadius = 6 * dp }
+        }
+        removeBtn = Button(this).apply { text = "✕ Remove"; alpha = .9f; visibility = View.GONE; setOnClickListener { removeCurrent() } }
+        root.addView(FrameLayout(this).apply {
+            addView(preview, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(badge, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.START).apply { setMargins(pad / 2, pad / 2, 0, 0) })
+            addView(removeBtn, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END))
+        }, LinearLayout.LayoutParams(MATCH_PARENT, (resources.displayMetrics.heightPixels * .36f).toInt()))
 
         // Full-screen viewer: hold anywhere for the original, Back closes it.
         fullImg = ImageView(this).apply {
@@ -286,9 +299,45 @@ class MainActivity : Activity() {
         if (running) { status.text = "Wait for the current batch to finish first"; return }
         files = list
         cur = 0
-        go.text = "Correct ${files.size} file${if (files.size == 1) "" else "s"}"
-        go.isEnabled = files.isNotEmpty()
+        updateCount()
         loadPreview()
+    }
+
+    private fun updateCount() {
+        go.text = "Correct ${files.size} file${if (files.size == 1) "" else "s"}"
+        go.isEnabled = files.isNotEmpty() && !running
+        removeBtn.visibility = if (files.isNotEmpty() && !running) View.VISIBLE else View.GONE
+    }
+
+    private fun removeCurrent() {
+        if (running || files.isEmpty()) return
+        files = files.filterIndexed { k, _ -> k != cur }
+        cur = cur.coerceAtMost(files.size - 1).coerceAtLeast(0)
+        updateCount()
+        if (files.isNotEmpty()) { loadPreview(); return }
+        previewSeq++; srcBmp = null; srcPx = null; outBmp = null
+        preview.setImageBitmap(null); badge.visibility = View.GONE
+        fileLabel.text = "Pick or share photos and videos to start"
+    }
+
+    // Our earlier output for this file in DCIM/DiveFix, if any (only files DiveFix created are visible to it).
+    private fun existing(base: String, video: Boolean): Uri? {
+        val col = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        return contentResolver.query(
+            col, arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+            arrayOf("DCIM/DiveFix/", base + if (video) ".mp4" else ".jpg"), null
+        )?.use { if (it.moveToFirst()) ContentUris.withAppendedId(col, it.getLong(0)) else null }
+    }
+
+    private fun refreshBadge() {
+        if (files.isEmpty()) return
+        val uri = files[cur]
+        val seq = previewSeq
+        thread {
+            val has = runCatching { existing(nameOf(uri).substringBeforeLast('.') + "_fix", isVideo(uri)) != null }.getOrDefault(false)
+            runOnUiThread { if (seq == previewSeq) badge.visibility = if (has) View.VISIBLE else View.GONE }
+        }
     }
 
     private fun showValue(i: Int) {
@@ -364,6 +413,8 @@ class MainActivity : Activity() {
         val uri = files[cur]
         val seq = ++previewSeq
         fileLabel.text = "${cur + 1}/${files.size}  ${nameOf(uri)}"
+        badge.visibility = View.GONE
+        refreshBadge()
         thread {
             val bmp = runCatching {
                 if (isVideo(uri)) MediaMetadataRetriever().run {
@@ -420,7 +471,7 @@ class MainActivity : Activity() {
 
     private fun startBatch() {
         running = true; cancelled = false; saved = 0; failed = 0; lastError = null
-        go.isEnabled = false; pick.isEnabled = false; stop.visibility = View.VISIBLE
+        go.isEnabled = false; pick.isEnabled = false; stop.visibility = View.VISIBLE; removeBtn.visibility = View.GONE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         process(0, matrix(), v[6] / 100f)
     }
@@ -428,7 +479,8 @@ class MainActivity : Activity() {
     private fun finishBatch() {
         running = false; transformer = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        go.isEnabled = files.isNotEmpty(); pick.isEnabled = true; stop.visibility = View.GONE
+        pick.isEnabled = true; stop.visibility = View.GONE
+        updateCount(); refreshBadge()
         if (!cancelled) bar.progress = 1000
         status.text = (if (cancelled) "Stopped. " else "Done. ") + "$saved saved to DCIM/DiveFix" +
             (if (failed > 0) ", $failed failed" + (lastError?.let { " ($it)" } ?: "") else "")
@@ -456,6 +508,7 @@ class MainActivity : Activity() {
                         for (x in 0 until w) { val p = row[x]; row[x] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
                         bmp.setPixels(row, 0, w, 0, y, w, 1)
                     }
+                    existing(base, false)?.let { old -> runCatching { contentResolver.delete(old, null, null) } } // replace the earlier fix
                     val out = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
                         put(MediaStore.MediaColumns.DISPLAY_NAME, "$base.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                         put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/DiveFix"); put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -505,6 +558,7 @@ class MainActivity : Activity() {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                     thread {
                         val result = runCatching {
+                            existing(base, true)?.let { old -> runCatching { contentResolver.delete(old, null, null) } } // replace the earlier fix
                             val out = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
                                 put(MediaStore.MediaColumns.DISPLAY_NAME, "$base.mp4"); put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
                                 put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/DiveFix"); put(MediaStore.MediaColumns.IS_PENDING, 1)
