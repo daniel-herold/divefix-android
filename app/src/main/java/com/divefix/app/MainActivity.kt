@@ -2,12 +2,12 @@ package com.divefix.app
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.ContentValues
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
@@ -28,6 +28,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -39,7 +40,8 @@ import androidx.annotation.OptIn
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.RgbMatrix
+import androidx.media3.container.Mp4TimestampData
+import androidx.media3.effect.SingleColorLut
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
@@ -47,6 +49,7 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.InAppMuxer
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
@@ -55,30 +58,43 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
 class MainActivity : Activity() {
-    private val ids = arrayOf("red", "green", "blue", "bright", "contrast", "sat")
-    private val names = arrayOf("Red restore", "Green", "Blue", "Brightness", "Contrast", "Saturation")
-    private val mins = floatArrayOf(0f, -30f, -40f, -.2f, .8f, .5f)
-    private val maxs = floatArrayOf(100f, 10f, 10f, .2f, 1.6f, 2f)
-    private val steps = floatArrayOf(1f, 1f, 1f, .01f, .01f, .01f)
-    private val tints = intArrayOf(0xFFF0704F.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0xFF4FB3C4.toInt(), 0xFF4FB3C4.toInt(), 0xFF4FB3C4.toInt())
-    private val defaults = """{"Shallow 0-5 m":{"red":30,"green":0,"blue":-10,"bright":0,"contrast":1.05,"sat":1.1},"Medium 5-15 m":{"red":60,"green":-8,"blue":-20,"bright":0.02,"contrast":1.1,"sat":1.2},"Deep 15 m+":{"red":100,"green":-15,"blue":-30,"bright":0.04,"contrast":1.15,"sat":1.3}}"""
+    private val ids = arrayOf("red", "green", "blue", "bright", "contrast", "sat", "pop")
+    private val names = arrayOf("Red restore", "Green", "Blue", "Brightness", "Contrast", "Saturation", "Vibrance (pop)")
+    private val mins = floatArrayOf(0f, -30f, -40f, -.2f, .8f, .5f, 0f)
+    private val maxs = floatArrayOf(100f, 10f, 10f, .2f, 1.6f, 2f, 100f)
+    private val steps = floatArrayOf(1f, 1f, 1f, .01f, .01f, .01f, 1f)
+    private val neutral = floatArrayOf(0f, 0f, 0f, 0f, 1f, 1f, 0f)
+    private val tints = intArrayOf(0xFFF0704F.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0xFF4FB3C4.toInt(), 0xFF4FB3C4.toInt(), 0xFF4FB3C4.toInt(), 0xFFE7B53C.toInt())
+    private val defaults = """{"Shallow 0-5 m":{"red":30,"green":0,"blue":-10,"bright":0,"contrast":1.05,"sat":1.05,"pop":20},"Medium 5-15 m":{"red":60,"green":-8,"blue":-20,"bright":0.02,"contrast":1.1,"sat":1.1,"pop":30},"Deep 15 m+":{"red":100,"green":-15,"blue":-30,"bright":0.04,"contrast":1.15,"sat":1.15,"pop":40}}"""
+    @Suppress("DEPRECATION")
     private val exifTags = arrayOf(
-        ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME, ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL,
+        ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED, ExifInterface.TAG_DATETIME,
+        ExifInterface.TAG_SUBSEC_TIME_ORIGINAL, ExifInterface.TAG_OFFSET_TIME_ORIGINAL, ExifInterface.TAG_OFFSET_TIME,
+        ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL,
         ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF, ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF,
-        ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER, ExifInterface.TAG_FOCAL_LENGTH
+        ExifInterface.TAG_GPS_ALTITUDE, ExifInterface.TAG_GPS_ALTITUDE_REF, ExifInterface.TAG_GPS_DATESTAMP, ExifInterface.TAG_GPS_TIMESTAMP,
+        ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER, ExifInterface.TAG_ISO_SPEED_RATINGS, ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+        ExifInterface.TAG_FOCAL_LENGTH, ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, ExifInterface.TAG_WHITE_BALANCE
     )
 
-    private val v = floatArrayOf(0f, 0f, 0f, 0f, 1f, 1f)
-    private val bars = arrayOfNulls<SeekBar>(6)
-    private val vals = arrayOfNulls<TextView>(6)
+    private val n = ids.size
+    private val v = neutral.copyOf()
+    private val bars = arrayOfNulls<SeekBar>(n)
+    private val vals = arrayOfNulls<TextView>(n)
     private var files = listOf<Uri>()
     private var cur = 0
     private var previewSeq = 0
+    @Volatile private var renderSeq = 0
+    private val renderer = Executors.newSingleThreadExecutor()
+    private var srcBmp: Bitmap? = null
+    private var srcPx: IntArray? = null
+    private var outBmp: Bitmap? = null
     private var transformer: Transformer? = null
     private var running = false
     private var cancelled = false
@@ -89,6 +105,9 @@ class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("divefix", MODE_PRIVATE) }
     private lateinit var presets: JSONObject
     private lateinit var preview: ImageView
+    private lateinit var full: Dialog
+    private lateinit var fullImg: ImageView
+    private lateinit var fullHint: TextView
     private lateinit var fileLabel: TextView
     private lateinit var spinner: Spinner
     private lateinit var bar: ProgressBar
@@ -105,8 +124,33 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFF0F1B20.toInt()); setPadding(pad, pad, pad, pad); fitsSystemWindows = true
         }
 
-        preview = ImageView(this).apply { setBackgroundColor(Color.BLACK); scaleType = ImageView.ScaleType.FIT_CENTER }
+        preview = ImageView(this).apply {
+            setBackgroundColor(Color.BLACK); scaleType = ImageView.ScaleType.FIT_CENTER; contentDescription = "Preview, tap for full screen"
+            setOnClickListener { openFull() }
+        }
         root.addView(preview, LinearLayout.LayoutParams(MATCH_PARENT, (resources.displayMetrics.heightPixels * .36f).toInt()))
+
+        // Full-screen viewer: hold anywhere for the original, Back closes it.
+        fullImg = ImageView(this).apply {
+            setBackgroundColor(Color.BLACK); scaleType = ImageView.ScaleType.FIT_CENTER
+            setOnTouchListener { view, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> { setImageBitmap(srcBmp); fullHint.visibility = View.GONE }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { setImageBitmap(outBmp ?: srcBmp); view.performClick() }
+                }
+                true
+            }
+        }
+        fullHint = TextView(this).apply {
+            text = "Hold anywhere for original · Back to return"; setTextColor(Color.WHITE); setBackgroundColor(0x99000000.toInt())
+            setPadding(pad, pad / 2, pad, pad / 2)
+        }
+        full = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply {
+            setContentView(FrameLayout(this@MainActivity).apply {
+                addView(fullImg, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+                addView(fullHint, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = 4 * pad })
+            })
+        }
 
         val nav = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         nav.addView(Button(this).apply {
@@ -114,7 +158,7 @@ class MainActivity : Activity() {
             setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } }
         })
         fileLabel = TextView(this).apply {
-            text = "Pick photos or videos to start"; setTextColor(0xFF8FA3A9.toInt()); isSingleLine = true; ellipsize = TextUtils.TruncateAt.MIDDLE
+            text = "Pick or share photos and videos to start"; setTextColor(0xFF8FA3A9.toInt()); isSingleLine = true; ellipsize = TextUtils.TruncateAt.MIDDLE
         }
         nav.addView(fileLabel, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         nav.addView(Button(this).apply {
@@ -125,8 +169,8 @@ class MainActivity : Activity() {
             text = "Hold: original"
             setOnTouchListener { view, e ->
                 when (e.action) {
-                    MotionEvent.ACTION_DOWN -> { preview.colorFilter = null }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { applyPreview(); view.performClick() }
+                    MotionEvent.ACTION_DOWN -> { preview.setImageBitmap(srcBmp) }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { preview.setImageBitmap(outBmp ?: srcBmp); view.performClick() }
                 }
                 true
             }
@@ -140,7 +184,7 @@ class MainActivity : Activity() {
         presetRow.addView(Button(this).apply { text = "Save"; setOnClickListener { savePreset() } })
         presetRow.addView(Button(this).apply { text = "Delete"; setOnClickListener { deletePreset() } })
         box.addView(presetRow)
-        for (i in 0 until 6) {
+        for (i in 0 until n) {
             val head = LinearLayout(this)
             head.addView(TextView(this).apply { text = names[i]; setTextColor(0xFFE3ECEE.toInt()); textSize = 15f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             vals[i] = TextView(this).apply { setTextColor(0xFF8FA3A9.toInt()) }
@@ -150,7 +194,7 @@ class MainActivity : Activity() {
                 progressTintList = ColorStateList.valueOf(tints[i]); thumbTintList = ColorStateList.valueOf(tints[i])
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) {
-                        if (user) { v[i] = mins[i] + p * steps[i]; showValue(i); applyPreview() }
+                        if (user) { v[i] = mins[i] + p * steps[i]; showValue(i); render() }
                     }
                     override fun onStartTrackingTouch(s: SeekBar) {}
                     override fun onStopTrackingTouch(s: SeekBar) {}
@@ -196,32 +240,55 @@ class MainActivity : Activity() {
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, view: View?, pos: Int, id: Long) {
                 presets.optJSONObject(p?.getItemAtPosition(pos) as? String ?: return)?.let { o ->
-                    for (i in 0 until 6) {
-                        v[i] = o.optDouble(ids[i], if (i >= 4) 1.0 else 0.0).toFloat()
+                    for (i in 0 until n) {
+                        v[i] = o.optDouble(ids[i], neutral[i].toDouble()).toFloat()
                         bars[i]!!.progress = ((v[i] - mins[i]) / steps[i]).roundToInt()
                         showValue(i)
                     }
-                    applyPreview()
+                    render()
                 }
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
         refreshPresets(null)
+        takeShared(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        takeShared(intent)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun takeShared(i: Intent?) {
+        val list = when (i?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+            Intent.ACTION_SEND_MULTIPLE -> i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.toList() ?: listOf()
+            else -> return
+        }
+        if (list.isNotEmpty()) setFiles(list)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK || data == null) return
-        files = data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data)
-        cur = 0
-        go.text = "Correct ${files.size} file${if (files.size == 1) "" else "s"}"
-        go.isEnabled = files.isNotEmpty() && !running
-        loadPreview()
+        setFiles(data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data))
     }
 
     override fun onDestroy() {
         transformer?.cancel()
+        renderer.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun setFiles(list: List<Uri>) {
+        if (running) { status.text = "Wait for the current batch to finish first"; return }
+        files = list
+        cur = 0
+        go.text = "Correct ${files.size} file${if (files.size == 1) "" else "s"}"
+        go.isEnabled = files.isNotEmpty()
+        loadPreview()
     }
 
     private fun showValue(i: Int) {
@@ -245,11 +312,46 @@ class MainActivity : Activity() {
         return out
     }
 
-    private fun applyPreview() {
-        val m = matrix()
-        preview.colorFilter = ColorMatrixColorFilter(floatArrayOf(
-            m[0], m[1], m[2], 0f, m[3] * 255, m[4], m[5], m[6], 0f, m[7] * 255, m[8], m[9], m[10], 0f, m[11] * 255, 0f, 0f, 0f, 1f, 0f
-        ))
+    // The one colour function used by the preview, photo export and (baked into a LUT) video export.
+    // Vibrance boosts muted colours strongly and already-saturated ones barely, so the water pops without neon fish.
+    private fun fx(r: Float, g: Float, b: Float, m: FloatArray, pop: Float): Int {
+        var nr = (m[0] * r + m[1] * g + m[2] * b + m[3]).coerceIn(0f, 1f)
+        var ng = (m[4] * r + m[5] * g + m[6] * b + m[7]).coerceIn(0f, 1f)
+        var nb = (m[8] * r + m[9] * g + m[10] * b + m[11]).coerceIn(0f, 1f)
+        if (pop > 0f) {
+            val chroma = maxOf(nr, ng, nb) - minOf(nr, ng, nb)
+            val k = 1 + pop * (1 - chroma) * (1 - chroma)
+            val l = .2126f * nr + .7152f * ng + .0722f * nb
+            nr = (l + (nr - l) * k).coerceIn(0f, 1f); ng = (l + (ng - l) * k).coerceIn(0f, 1f); nb = (l + (nb - l) * k).coerceIn(0f, 1f)
+        }
+        return Color.rgb((nr * 255 + .5f).toInt(), (ng * 255 + .5f).toInt(), (nb * 255 + .5f).toInt())
+    }
+
+    private fun render() {
+        val px = srcPx ?: return
+        val src = srcBmp ?: return
+        val seq = ++renderSeq
+        val m = matrix(); val pop = v[6] / 100f
+        renderer.execute {
+            if (seq != renderSeq) return@execute
+            val out = IntArray(px.size)
+            for (k in px.indices) { val p = px[k]; out[k] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
+            val bmp = Bitmap.createBitmap(out, src.width, src.height, Bitmap.Config.ARGB_8888)
+            runOnUiThread {
+                if (seq != renderSeq) return@runOnUiThread
+                outBmp = bmp
+                preview.setImageBitmap(bmp)
+                if (full.isShowing) fullImg.setImageBitmap(bmp)
+            }
+        }
+    }
+
+    private fun openFull() {
+        if (srcBmp == null) return
+        fullImg.setImageBitmap(outBmp ?: srcBmp)
+        fullHint.visibility = View.VISIBLE
+        full.show()
+        ui.postDelayed({ fullHint.visibility = View.GONE }, 3000)
     }
 
     private fun nameOf(uri: Uri): String =
@@ -267,16 +369,21 @@ class MainActivity : Activity() {
                 if (isVideo(uri)) MediaMetadataRetriever().run {
                     setDataSource(this@MainActivity, uri)
                     val mid = (extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L) * 500
-                    val f = getScaledFrameAtTime(mid, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 1600, 1600)
-                    release(); f
+                    val f = getScaledFrameAtTime(mid, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 1440, 1440)
+                    release()
+                    f?.copy(Bitmap.Config.ARGB_8888, false)
                 } else ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { d, info, _ ->
-                    d.setTargetSampleSize(maxOf(1, maxOf(info.size.width, info.size.height) / 1600))
-                }
+                    d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val scale = 1440f / maxOf(info.size.width, info.size.height)
+                    if (scale < 1f) d.setTargetSize((info.size.width * scale).toInt(), (info.size.height * scale).toInt())
+                }.copy(Bitmap.Config.ARGB_8888, false)
             }.getOrNull()
+            val px = bmp?.let { IntArray(it.width * it.height).also { a -> it.getPixels(a, 0, it.width, 0, 0, it.width, it.height) } }
             runOnUiThread {
                 if (seq != previewSeq) return@runOnUiThread
-                preview.setImageBitmap(bmp); applyPreview()
-                if (bmp == null) status.text = "Can't preview this file"
+                srcBmp = bmp; srcPx = px; outBmp = null
+                preview.setImageBitmap(bmp)
+                if (bmp == null) status.text = "Can't preview this file" else render()
             }
         }
     }
@@ -291,20 +398,20 @@ class MainActivity : Activity() {
         val input = EditText(this).apply { setText(spinner.selectedItem as? String ?: ""); selectAll() }
         AlertDialog.Builder(this).setTitle("Save preset").setView(input)
             .setPositiveButton("Save") { _, _ ->
-                val n = input.text.toString().trim()
-                if (n.isEmpty()) return@setPositiveButton
-                presets.put(n, JSONObject().apply { for (i in 0 until 6) put(ids[i], v[i].toDouble()) })
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) return@setPositiveButton
+                presets.put(name, JSONObject().apply { for (i in 0 until n) put(ids[i], v[i].toDouble()) })
                 prefs.edit().putString("presets", presets.toString()).apply()
-                refreshPresets(n)
+                refreshPresets(name)
             }
             .setNegativeButton("Cancel", null).show()
     }
 
     private fun deletePreset() {
-        val n = spinner.selectedItem as? String ?: return
-        AlertDialog.Builder(this).setMessage("Delete preset \"$n\"?")
+        val name = spinner.selectedItem as? String ?: return
+        AlertDialog.Builder(this).setMessage("Delete preset \"$name\"?")
             .setPositiveButton("Delete") { _, _ ->
-                presets.remove(n)
+                presets.remove(name)
                 prefs.edit().putString("presets", presets.toString()).apply()
                 refreshPresets(null)
             }
@@ -315,7 +422,7 @@ class MainActivity : Activity() {
         running = true; cancelled = false; saved = 0; failed = 0; lastError = null
         go.isEnabled = false; pick.isEnabled = false; stop.visibility = View.VISIBLE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        process(0, matrix())
+        process(0, matrix(), v[6] / 100f)
     }
 
     private fun finishBatch() {
@@ -327,7 +434,7 @@ class MainActivity : Activity() {
             (if (failed > 0) ", $failed failed" + (lastError?.let { " ($it)" } ?: "") else "")
     }
 
-    private fun process(i: Int, m: FloatArray) {
+    private fun process(i: Int, m: FloatArray, pop: Float) {
         if (!running) return
         if (cancelled || i >= files.size) { finishBatch(); return }
         val uri = files[i]
@@ -346,15 +453,7 @@ class MainActivity : Activity() {
                     val row = IntArray(w)
                     for (y in 0 until bmp.height) {
                         bmp.getPixels(row, 0, w, 0, y, w, 1)
-                        for (x in 0 until w) {
-                            val p = row[x]
-                            val r = (p shr 16 and 255) / 255f; val g = (p shr 8 and 255) / 255f; val b = (p and 255) / 255f
-                            row[x] = Color.rgb(
-                                ((m[0] * r + m[1] * g + m[2] * b + m[3]).coerceIn(0f, 1f) * 255 + .5f).toInt(),
-                                ((m[4] * r + m[5] * g + m[6] * b + m[7]).coerceIn(0f, 1f) * 255 + .5f).toInt(),
-                                ((m[8] * r + m[9] * g + m[10] * b + m[11]).coerceIn(0f, 1f) * 255 + .5f).toInt()
-                            )
-                        }
+                        for (x in 0 until w) { val p = row[x]; row[x] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
                         bmp.setPixels(row, 0, w, 0, y, w, 1)
                     }
                     val out = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
@@ -363,7 +462,7 @@ class MainActivity : Activity() {
                     })!!
                     contentResolver.openOutputStream(out)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
                     bmp.recycle()
-                    runCatching { // keep capture date, GPS and camera info; orientation is already applied to the pixels
+                    runCatching { // capture date, GPS and camera info; orientation is already applied to the pixels
                         val src = contentResolver.openInputStream(uri)!!.use { ExifInterface(it) }
                         contentResolver.openFileDescriptor(out, "rw")!!.use { fd ->
                             ExifInterface(fd.fileDescriptor).apply { exifTags.forEach { t -> src.getAttribute(t)?.let { setAttribute(t, it) } }; saveAttributes() }
@@ -373,7 +472,7 @@ class MainActivity : Activity() {
                 }
                 runOnUiThread {
                     if (result.isSuccess) saved++ else { failed++; lastError = result.exceptionOrNull()?.message }
-                    process(i + 1, m)
+                    process(i + 1, m, pop)
                 }
             }
             return
@@ -387,14 +486,21 @@ class MainActivity : Activity() {
                 .parse(mr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)!!)!!.time
         }.getOrNull()
         mr.release()
-        // Same matrix as the preview, as a column-major 4x4 for the GPU (offsets ride on alpha = 1).
-        val gl = floatArrayOf(m[0], m[4], m[8], 0f, m[1], m[5], m[9], 0f, m[2], m[6], m[10], 0f, m[3], m[7], m[11], 1f)
+        // Bake fx() into a 33x33x33 LUT; the GPU interpolates it trilinearly per pixel.
+        val lut = Array(33) { r -> Array(33) { g -> IntArray(33) { b -> fx(r / 32f, g / 32f, b / 32f, m, pop) } } }
         val item = EditedMediaItem.Builder(MediaItem.fromUri(uri))
-            .setEffects(Effects(listOf(), listOf<Effect>(RgbMatrix { _, _ -> gl })))
+            .setEffects(Effects(listOf(), listOf<Effect>(SingleColorLut.createFromCube(lut))))
             .build()
         val t = Transformer.Builder(this)
             .setEncoderFactory(DefaultEncoderFactory.Builder(this)
                 .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(bitrate).build()).build())
+            // Media3's own muxer, so the original recording date is written into the new MP4.
+            .setMuxerFactory(InAppMuxer.Factory.Builder().setMetadataProvider { entries ->
+                if (taken != null) {
+                    entries.removeIf { it is Mp4TimestampData }
+                    entries.add(Mp4TimestampData(Mp4TimestampData.unixTimeToMp4TimeSeconds(taken), Mp4TimestampData.unixTimeToMp4TimeSeconds(taken)))
+                }
+            }.build())
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                     thread {
@@ -410,14 +516,14 @@ class MainActivity : Activity() {
                         tmp.delete()
                         runOnUiThread {
                             if (result.isSuccess) saved++ else { failed++; lastError = result.exceptionOrNull()?.message }
-                            process(i + 1, m)
+                            process(i + 1, m, pop)
                         }
                     }
                 }
 
                 override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                     tmp.delete(); failed++; lastError = exportException.message
-                    process(i + 1, m)
+                    process(i + 1, m, pop)
                 }
             })
             .build()
