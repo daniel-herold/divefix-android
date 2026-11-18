@@ -22,6 +22,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.TextUtils
@@ -75,6 +76,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
@@ -103,7 +105,7 @@ class MainActivity : Activity() {
     private val muted = 0xFF8FA3A9.toInt()
 
     /** Grid thumbnail: source pixels plus the last corrected rendering (ver = settings version it was rendered with). */
-    class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, var fixed: Boolean, var out: Bitmap?, var ver: Int)
+    class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, val outName: String, var phone: Boolean, var out: Bitmap?, var ver: Int)
 
     /** Semi-transparent RGB histogram overlay. */
     inner class Histo(ctx: Context) : View(ctx) {
@@ -159,6 +161,11 @@ class MainActivity : Activity() {
     private var saved = 0
     private var failed = 0
     private var lastError: String? = null
+    private var dest = 0  // 0 = phone, 1 = camera card, 2 = both
+    private var batchDest = 0
+    @Volatile private var cardTree: Uri? = null
+    @Volatile private var cardDir: Uri? = null  // the DiveFix folder on the card
+    @Volatile private var cardFiles = ConcurrentHashMap<String, String>()  // file name -> document id in that folder
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("divefix", MODE_PRIVATE) }
     private lateinit var presets: JSONObject
@@ -188,6 +195,8 @@ class MainActivity : Activity() {
     private lateinit var pick: Button
     private lateinit var go: Button
     private lateinit var stop: Button
+    private lateinit var destSpinner: Spinner
+    private lateinit var cardBtn: Button
 
     private val applyFx = Runnable { player?.setVideoEffects(if (holding) listOf() else listOf<Effect>(lut(matrix(), v[6] / 100f))) }
     private val ticker = object : Runnable {
@@ -349,6 +358,24 @@ class MainActivity : Activity() {
         }
         stop = Button(this).apply { text = "Cancel"; visibility = View.GONE; setOnClickListener { cancelled = true; transformer?.cancel(); finishBatch() } }
         actions.addView(pick); actions.addView(go, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); actions.addView(stop)
+        dest = prefs.getInt("dest", 0)
+        destSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf("Save to phone", "Save to camera card", "Save to phone + card"))
+            setSelection(dest)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                    if (pos == dest) return
+                    if (pos > 0 && prefs.getString("cardTree", null) == null) { chooseCard(); return }  // dest is set once a folder is chosen
+                    dest = pos; prefs.edit().putInt("dest", pos).apply(); cardBtn.visibility = if (dest > 0) View.VISIBLE else View.GONE
+                }
+                override fun onNothingSelected(p: AdapterView<*>?) {}
+            }
+        }
+        cardBtn = Button(this).apply { text = "Card folder…"; visibility = if (dest > 0) View.VISIBLE else View.GONE; setOnClickListener { chooseCard() } }
+        val destRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(destSpinner, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); addView(cardBtn)
+        }
 
         // ---------- layout: phone stacks everything, tablet puts a compact control panel beside a big grid ----------
         val root: LinearLayout
@@ -359,7 +386,7 @@ class MainActivity : Activity() {
             }
             val right = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)); addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(status); addView(actions)
+                addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)); addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(status); addView(destRow); addView(actions)
             }
             root = LinearLayout(this).apply {
                 addView(left, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
@@ -371,7 +398,7 @@ class MainActivity : Activity() {
                 addView(content, LinearLayout.LayoutParams(MATCH_PARENT, resources.displayMetrics.widthPixels - 2 * pad))  // square: 3x3 grid
                 addView(nav); addView(videoRow)
                 addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-                addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(status); addView(actions)
+                addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(status); addView(destRow); addView(actions)
             }
         }
         root.apply { setBackgroundColor(0xFF0F1B20.toInt()); setPadding(pad, pad, pad, pad); fitsSystemWindows = true }
@@ -439,6 +466,19 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 2) {
+            val tree = data?.data
+            if (resultCode != RESULT_OK || tree == null) { destSpinner.setSelection(dest); return }
+            contentResolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            prefs.edit().putString("cardTree", tree.toString()).apply()
+            if (dest == 0) { dest = destSpinner.selectedItemPosition.coerceAtLeast(1); prefs.edit().putInt("dest", dest).apply() }
+            cardBtn.visibility = View.VISIBLE
+            thread {
+                val ok = openCard(true)
+                runOnUiThread { status.text = if (ok) "Card folder set: fixed files go to its DiveFix folder" else "Can't write to that folder"; adapter.notifyDataSetChanged(); refreshBadge() }
+            }
+            return
+        }
         if (resultCode != RESULT_OK || data == null) return
         setFiles(data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data))
     }
@@ -446,6 +486,11 @@ class MainActivity : Activity() {
     @Deprecated("Back in the single view returns to the grid")
     override fun onBackPressed() {
         if (single) exitSingle() else @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        thread { openCard(false); runOnUiThread { adapter.notifyDataSetChanged(); refreshBadge() } }  // the camera may have been plugged in meanwhile
     }
 
     override fun onPause() {
@@ -596,9 +641,9 @@ class MainActivity : Activity() {
         setBackgroundColor(0xFF16252B.toInt())
         addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         addView(TextView(context).apply {
-            text = "✓"; setTextColor(Color.WHITE); textSize = 12f; gravity = Gravity.CENTER
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xE01F7A8C.toInt()) }
-        }, FrameLayout.LayoutParams((22 * dp).toInt(), (22 * dp).toInt(), Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
+            setTextColor(Color.WHITE); textSize = 11f; setPadding((6 * dp).toInt(), (1 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
+            background = GradientDrawable().apply { setColor(0xE01F7A8C.toInt()); cornerRadius = 10 * dp }
+        }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
         addView(TextView(context).apply {
             setTextColor(Color.WHITE); textSize = 11f; setShadowLayer(4f, 0f, 0f, Color.BLACK); setPadding((5 * dp).toInt(), 0, 0, (3 * dp).toInt())
         }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.START))
@@ -608,7 +653,7 @@ class MainActivity : Activity() {
 
     private fun bindCell(cell: FrameLayout, uri: Uri) {
         val img = cell.getChildAt(0) as ImageView
-        val fixedTv = cell.getChildAt(1)
+        val fixedTv = cell.getChildAt(1) as TextView
         val durTv = cell.getChildAt(2) as TextView
         val t = thumbs.get(uri)
         if (t == null) {
@@ -623,7 +668,8 @@ class MainActivity : Activity() {
             return
         }
         img.setImageBitmap(t.out)
-        fixedTv.visibility = if (t.fixed) View.VISIBLE else View.GONE
+        val ft = fixedText(t.phone, cardFiles.containsKey(t.outName), true)
+        fixedTv.text = ft; fixedTv.visibility = if (ft != null) View.VISIBLE else View.GONE
         durTv.visibility = if (t.dur >= 0) View.VISIBLE else View.GONE
         durTv.text = "▶ %d:%02d".format(t.dur / 60000, t.dur / 1000 % 60)
         if (t.ver != renderSeq) renderThumbs(listOf(uri), matrix(), v[6] / 100f, renderSeq)
@@ -643,12 +689,13 @@ class MainActivity : Activity() {
         val dur = if (!video) -1L else runCatching {
             MediaMetadataRetriever().run { setDataSource(this@MainActivity, uri); val d = extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong(); release(); d }
         }.getOrDefault(0L)
-        val fixed = runCatching { existing(nameOf(uri).substringBeforeLast('.') + "_fix", video) != null }.getOrDefault(false)
-        if (bmp == null) return Thumb(IntArray(0), 0, 0, dur, fixed, null, seq)
+        val outName = outName(uri, video)
+        val phone = runCatching { existing(outName, video) != null }.getOrDefault(false)
+        if (bmp == null) return Thumb(IntArray(0), 0, 0, dur, outName, phone, null, seq)
         val px = IntArray(bmp.width * bmp.height).also { bmp.getPixels(it, 0, bmp.width, 0, 0, bmp.width, bmp.height) }
         val out = IntArray(px.size)
         for (k in px.indices) { val p = px[k]; out[k] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
-        return Thumb(px, bmp.width, bmp.height, dur, fixed, Bitmap.createBitmap(out, bmp.width, bmp.height, Bitmap.Config.ARGB_8888), seq)
+        return Thumb(px, bmp.width, bmp.height, dur, outName, phone, Bitmap.createBitmap(out, bmp.width, bmp.height, Bitmap.Config.ARGB_8888), seq)
     }
 
     private fun renderThumbs(list: List<Uri>, m: FloatArray, pop: Float, seq: Int) {
@@ -816,23 +863,92 @@ class MainActivity : Activity() {
     private fun isVideo(uri: Uri) = contentResolver.getType(uri)?.startsWith("video") == true
 
     // Our earlier output for this file in DCIM/DiveFix, if any (only files DiveFix created are visible to it).
-    private fun existing(base: String, video: Boolean): Uri? {
+    private fun existing(fileName: String, video: Boolean): Uri? {
         val col = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         return contentResolver.query(
             col, arrayOf(MediaStore.MediaColumns._ID),
             "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
-            arrayOf("DCIM/DiveFix/", base + if (video) ".mp4" else ".jpg"), null
+            arrayOf("DCIM/DiveFix/", fileName), null
         )?.use { if (it.moveToFirst()) ContentUris.withAppendedId(col, it.getLong(0)) else null }
     }
 
+    private fun outName(uri: Uri, video: Boolean) = nameOf(uri).substringBeforeLast('.') + "_fix" + if (video) ".mp4" else ".jpg"
+
+    private fun fixedText(phone: Boolean, card: Boolean, short: Boolean) = when {
+        phone && card -> if (short) "✓ P+C" else "✓ Fixed on phone + card"
+        phone -> if (short) "✓ P" else "✓ Fixed on phone"
+        card -> if (short) "✓ C" else "✓ Fixed on card"
+        else -> null
+    }
+
     private fun refreshBadge() {
-        if (files.isEmpty()) return
+        if (files.isEmpty() || !single) return
         val uri = files[cur]
         val fs = fileSeq
         thread {
-            val has = runCatching { existing(nameOf(uri).substringBeforeLast('.') + "_fix", isVideo(uri)) != null }.getOrDefault(false)
-            runOnUiThread { if (fs == fileSeq) badge.visibility = if (has) View.VISIBLE else View.GONE }
+            val video = isVideo(uri)
+            val name = outName(uri, video)
+            val phone = runCatching { existing(name, video) != null }.getOrDefault(false)
+            val text = fixedText(phone, cardFiles.containsKey(name), false)
+            runOnUiThread { if (fs == fileSeq) { badge.text = text; badge.visibility = if (text != null) View.VISIBLE else View.GONE } }
         }
+    }
+
+    private fun chooseCard() {
+        status.text = "Choose the camera card (its top folder). DiveFix creates a DiveFix folder there."
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), 2)
+    }
+
+    // Finds (or creates) the DiveFix folder on the saved card and lists what is in it. False if the card isn't reachable.
+    private fun openCard(create: Boolean): Boolean {
+        val tree = prefs.getString("cardTree", null)?.let { Uri.parse(it) } ?: return false
+        return runCatching {
+            val cols = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
+            val rootId = DocumentsContract.getTreeDocumentId(tree)
+            var dirId: String? = null
+            contentResolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(tree, rootId), cols, null, null, null)!!.use { c ->
+                while (c.moveToNext()) if (c.getString(1) == "DiveFix" && c.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) dirId = c.getString(0)
+            }
+            val dir = dirId?.let { DocumentsContract.buildDocumentUriUsingTree(tree, it) }
+                ?: if (create) DocumentsContract.createDocument(contentResolver, DocumentsContract.buildDocumentUriUsingTree(tree, rootId), DocumentsContract.Document.MIME_TYPE_DIR, "DiveFix")!! else null
+            val list = ConcurrentHashMap<String, String>()
+            if (dir != null) contentResolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(dir)), cols, null, null, null)!!.use { c ->
+                while (c.moveToNext()) list[c.getString(1)] = c.getString(0)
+            }
+            cardTree = tree; cardDir = dir; cardFiles = list
+            dir != null || !create
+        }.getOrElse { cardTree = null; cardDir = null; cardFiles = ConcurrentHashMap(); false }
+    }
+
+    // Copies a finished export to the chosen destinations, replacing an earlier fix of the same file in each.
+    private fun save(tmp: File, name: String, video: Boolean, taken: Long?) {
+        val errors = mutableListOf<String>()
+        if (batchDest != 1) runCatching {
+            existing(name, video)?.let { old -> runCatching { contentResolver.delete(old, null, null) } }
+            val out = contentResolver.insert(if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name); put(MediaStore.MediaColumns.MIME_TYPE, if (video) "video/mp4" else "image/jpeg")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/DiveFix"); put(MediaStore.MediaColumns.IS_PENDING, 1)
+                if (video) taken?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+            })!!
+            runCatching {
+                contentResolver.openOutputStream(out)!!.use { o -> tmp.inputStream().use { it.copyTo(o, 1 shl 20) } }
+                contentResolver.update(out, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            }.onFailure { contentResolver.delete(out, null, null); throw it }
+        }.onFailure { errors += "phone: ${it.message}" }
+        if (batchDest != 0) runCatching {
+            val tree = cardTree!!; val dir = cardDir ?: error("camera card not connected")
+            val old = cardFiles[name]
+            val target = old?.let { DocumentsContract.buildDocumentUriUsingTree(tree, it) }
+                ?: DocumentsContract.createDocument(contentResolver, dir, if (video) "video/mp4" else "image/jpeg", name)!!
+            runCatching { contentResolver.openOutputStream(target, "wt")!!.use { o -> tmp.inputStream().use { it.copyTo(o, 1 shl 20) } } }
+                .onFailure { if (old == null) runCatching { DocumentsContract.deleteDocument(contentResolver, target) }; throw it }
+            cardFiles[name] = DocumentsContract.getDocumentId(target)
+        }.onFailure { errors += "card: ${it.message}" }
+        if (errors.isNotEmpty()) throw IllegalStateException(errors.joinToString("; "))
+    }
+
+    private fun tally(r: Result<*>) {
+        if (r.isSuccess) saved++ else { failed++; lastError = r.exceptionOrNull()?.message }
     }
 
     private fun refreshPresets(select: String?) {
@@ -869,23 +985,35 @@ class MainActivity : Activity() {
 
     private fun startBatch() {
         releasePlayer()
-        running = true; cancelled = false; saved = 0; failed = 0; lastError = null
-        go.isEnabled = false; pick.isEnabled = false; stop.visibility = View.VISIBLE; removeBtn.visibility = View.GONE
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        process(0, matrix(), v[6] / 100f)
+        running = true; cancelled = false; saved = 0; failed = 0; lastError = null; batchDest = dest
+        go.isEnabled = false; pick.isEnabled = false; destSpinner.isEnabled = false; removeBtn.visibility = View.GONE
+        val m = matrix(); val pop = v[6] / 100f
+        thread {
+            val ok = batchDest == 0 || openCard(true)
+            runOnUiThread {
+                if (!ok) {
+                    running = false; pick.isEnabled = true; destSpinner.isEnabled = true; updateCount()
+                    status.text = "Camera card not reachable. Connect the camera in USB mode, or tap Card folder… to choose it again."
+                    return@runOnUiThread
+                }
+                stop.visibility = View.VISIBLE
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                process(0, m, pop)
+            }
+        }
     }
 
     private fun finishBatch() {
         running = false; transformer = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        pick.isEnabled = true; stop.visibility = View.GONE
+        pick.isEnabled = true; destSpinner.isEnabled = true; stop.visibility = View.GONE
         updateCount(); refreshBadge()
         if (!cancelled) bar.progress = 1000
-        status.text = (if (cancelled) "Stopped. " else "Done. ") + "$saved saved to DCIM/DiveFix" +
+        status.text = (if (cancelled) "Stopped. " else "Done. ") + "$saved saved to " + listOf("phone (DCIM/DiveFix)", "camera card (DiveFix)", "phone + card")[batchDest] +
             (if (failed > 0) ", $failed failed" + (lastError?.let { " ($it)" } ?: "") else "")
         val snap = thumbs.snapshot()  // refresh the ✓ marks in the grid
         thread {
-            snap.forEach { (u, t) -> t.fixed = runCatching { existing(nameOf(u).substringBeforeLast('.') + "_fix", t.dur >= 0) != null }.getOrDefault(t.fixed) }
+            snap.forEach { (_, t) -> t.phone = runCatching { existing(t.outName, t.dur >= 0) != null }.getOrDefault(t.phone) }
             runOnUiThread { adapter.notifyDataSetChanged() }
         }
     }
@@ -901,6 +1029,7 @@ class MainActivity : Activity() {
 
         if (!isVideo(uri)) {
             thread {
+                val tmp = File(cacheDir, "export.jpg")
                 val result = runCatching {
                     val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { d, _, _ ->
                         d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE; d.isMutableRequired = true
@@ -912,25 +1041,16 @@ class MainActivity : Activity() {
                         for (x in 0 until w) { val p = row[x]; row[x] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
                         bmp.setPixels(row, 0, w, 0, y, w, 1)
                     }
-                    existing(base, false)?.let { old -> runCatching { contentResolver.delete(old, null, null) } } // replace the earlier fix
-                    val out = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, "$base.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/DiveFix"); put(MediaStore.MediaColumns.IS_PENDING, 1)
-                    })!!
-                    contentResolver.openOutputStream(out)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                    tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
                     bmp.recycle()
                     runCatching { // capture date, GPS and camera info; orientation is already applied to the pixels
                         val src = contentResolver.openInputStream(uri)!!.use { ExifInterface(it) }
-                        contentResolver.openFileDescriptor(out, "rw")!!.use { fd ->
-                            ExifInterface(fd.fileDescriptor).apply { exifTags.forEach { t -> src.getAttribute(t)?.let { setAttribute(t, it) } }; saveAttributes() }
-                        }
+                        ExifInterface(tmp.absolutePath).apply { exifTags.forEach { t -> src.getAttribute(t)?.let { setAttribute(t, it) } }; saveAttributes() }
                     }
-                    contentResolver.update(out, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                    save(tmp, "$base.jpg", false, null)
                 }
-                runOnUiThread {
-                    if (result.isSuccess) saved++ else { failed++; lastError = result.exceptionOrNull()?.message }
-                    process(i + 1, m, pop)
-                }
+                tmp.delete()
+                runOnUiThread { tally(result); process(i + 1, m, pop) }
             }
             return
         }
@@ -961,21 +1081,9 @@ class MainActivity : Activity() {
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                     thread {
-                        val result = runCatching {
-                            existing(base, true)?.let { old -> runCatching { contentResolver.delete(old, null, null) } } // replace the earlier fix
-                            val out = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
-                                put(MediaStore.MediaColumns.DISPLAY_NAME, "$base.mp4"); put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-                                put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/DiveFix"); put(MediaStore.MediaColumns.IS_PENDING, 1)
-                                taken?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
-                            })!!
-                            contentResolver.openOutputStream(out)!!.use { o -> tmp.inputStream().use { it.copyTo(o, 1 shl 20) } }
-                            contentResolver.update(out, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-                        }
+                        val result = runCatching { save(tmp, "$base.mp4", true, taken) }
                         tmp.delete()
-                        runOnUiThread {
-                            if (result.isSuccess) saved++ else { failed++; lastError = result.exceptionOrNull()?.message }
-                            process(i + 1, m, pop)
-                        }
+                        runOnUiThread { tally(result); process(i + 1, m, pop) }
                     }
                 }
 
