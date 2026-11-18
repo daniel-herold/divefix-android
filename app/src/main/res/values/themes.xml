@@ -1,0 +1,32 @@
+<resources>
+    <style name="Theme.DiveFix" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#6CCFDD</item>
+        <item name="colorOnPrimary">#00363D</item>
+        <item name="colorPrimaryContainer">#004F58</item>
+        <item name="colorOnPrimaryContainer">#A2EEFF</item>
+        <item name="colorSecondary">#B1CBD0</item>
+        <item name="colorOnSecondary">#1C3438</item>
+        <item name="colorSecondaryContainer">#2E3B3E</item>
+        <item name="colorOnSecondaryContainer">#D3E5E9</item>
+        <item name="colorSurface">#111415</item>
+        <item name="colorOnSurface">#E1E3E3</item>
+        <item name="colorOnSurfaceVariant">#A8B0B2</item>
+        <item name="colorSurfaceContainerLowest">#0C0F10</item>
+        <item name="colorSurfaceContainerLow">#191C1D</item>
+        <item name="colorSurfaceContainer">#1D2021</item>
+        <item name="colorSurfaceContainerHigh">#272A2B</item>
+        <item name="colorSurfaceContainerHighest">#323536</item>
+        <item name="colorOutline">#899294</item>
+        <item name="colorOutlineVariant">#3F484A</item>
+        <item name="colorError">#FFB4AB</item>
+        <item name="actionMenuTextAppearance">@style/TextAppearance.DiveFix.Menu</item>
+        <item name="android:colorBackground">#111415</item>
+        <item name="android:statusBarColor">#111415</item>
+        <item name="android:navigationBarColor">#1D2021</item>
+    </style>
+    <style name="TextAppearance.DiveFix.Menu" parent="TextAppearance.Material3.LabelLarge">
+        <item name="android:textAllCaps">false</item>
+        <item name="textAllCaps">false</item>
+        <item name="android:textColor">?attr/colorPrimary</item>
+    </style>
+</resources>

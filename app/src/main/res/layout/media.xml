@@ -1,0 +1,63 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="?attr/colorSurfaceContainerLowest">
+
+    <GridView android:id="@+id/grid" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:horizontalSpacing="2dp" android:verticalSpacing="2dp" android:stretchMode="columnWidth" />
+
+    <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:orientation="vertical" android:gravity="center" android:padding="32dp">
+        <ImageView android:layout_width="48dp" android:layout_height="48dp" android:src="@drawable/ic_photos"
+            android:importantForAccessibility="no" app:tint="?attr/colorOnSurfaceVariant" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="16dp"
+            android:text="No photos or videos selected" android:textAppearance="?attr/textAppearanceTitleMedium" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:gravity="center" android:maxWidth="320dp" android:textColor="?attr/colorOnSurfaceVariant"
+            android:text="Add them here, share them to DiveFix from your gallery, or connect your camera by USB and pick them from its card."
+            android:textAppearance="?attr/textAppearanceBodyMedium" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/emptyAdd" style="@style/Widget.Material3.Button.Icon" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="Add photos and videos" app:icon="@drawable/ic_add" />
+    </LinearLayout>
+
+    <FrameLayout android:id="@+id/single" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:background="@android:color/black" android:visibility="gone">
+        <SurfaceView android:id="@+id/surface" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:layout_gravity="center" android:visibility="gone" />
+        <ImageView android:id="@+id/image" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:scaleType="fitCenter" android:contentDescription="Preview. Tap for full screen." />
+        <TextView android:id="@+id/originalTag" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal" android:layout_marginTop="12dp" android:background="@drawable/pill"
+            android:paddingHorizontal="12dp" android:paddingVertical="4dp" android:text="Original" android:textColor="@android:color/white"
+            android:textAppearance="?attr/textAppearanceLabelLarge" android:visibility="gone" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/prev" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:layout_gravity="start|center_vertical" android:layout_marginStart="4dp"
+            android:alpha="0.85" android:contentDescription="Previous" app:icon="@drawable/ic_chevron_left" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/next" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:layout_gravity="end|center_vertical" android:layout_marginEnd="4dp"
+            android:alpha="0.85" android:contentDescription="Next" app:icon="@drawable/ic_chevron_right" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_gravity="bottom"
+            android:background="@drawable/scrim_bottom" android:orientation="vertical" android:paddingHorizontal="8dp"
+            android:paddingTop="32dp" android:paddingBottom="4dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom">
+                <com.google.android.material.button.MaterialButton android:id="@+id/compare" style="@style/Widget.Material3.Button.TonalButton.Icon" android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" android:text="Hold to compare" app:icon="@drawable/ic_compare" />
+                <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
+                <com.divefix.app.Histo android:id="@+id/histo" android:layout_width="@dimen/histo_w" android:layout_height="@dimen/histo_h"
+                    android:layout_marginBottom="6dp" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/videoRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:gravity="center_vertical" android:visibility="gone">
+                <com.google.android.material.button.MaterialButton android:id="@+id/play" style="@style/Widget.Material3.Button.IconButton" android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" android:contentDescription="Play" app:icon="@drawable/ic_play"
+                    app:iconTint="@android:color/white" />
+                <com.google.android.material.slider.Slider android:id="@+id/timeline" android:layout_width="0dp"
+                    android:layout_height="wrap_content" android:layout_weight="1" android:valueFrom="0" android:valueTo="1"
+                    android:contentDescription="Position in video" app:labelBehavior="gone" />
+                <TextView android:id="@+id/time" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp" android:fontFeatureSettings="tnum" android:textColor="@android:color/white"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+</FrameLayout>

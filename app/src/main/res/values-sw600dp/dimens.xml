@@ -1,0 +1,4 @@
+<resources>
+    <dimen name="histo_w">200dp</dimen>
+    <dimen name="histo_h">100dp</dimen>
+</resources>

@@ -1,20 +1,13 @@
 package com.divefix.app
 
-import android.app.Activity
-import android.app.AlertDialog
-import android.app.Dialog
 import android.content.ContentUris
 import android.content.ContentValues
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageDecoder
-import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
@@ -25,10 +18,11 @@ import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.text.TextUtils
 import android.util.LruCache
 import android.util.Size
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.SurfaceView
 import android.view.View
@@ -36,21 +30,18 @@ import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.Button
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.ScrollView
-import android.widget.SeekBar
-import android.widget.Spinner
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.appcompat.app.AppCompatActivity
+import android.app.Dialog
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -71,6 +62,19 @@ import androidx.media3.transformer.InAppMuxer
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
+import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.slider.LabelFormatter
+import com.google.android.material.slider.Slider
+import com.google.android.material.snackbar.Snackbar
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -82,14 +86,14 @@ import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
+    // Each adjustment is stored as the value the colour maths uses (v) and shown as -100..+100 or 0..100, 0 = no change.
     private val ids = arrayOf("red", "green", "blue", "bright", "contrast", "sat", "pop")
-    private val names = arrayOf("Red restore", "Green", "Blue", "Brightness", "Contrast", "Saturation", "Vibrance (pop)")
-    private val mins = floatArrayOf(0f, -30f, -40f, -.2f, .8f, .5f, 0f)
-    private val maxs = floatArrayOf(100f, 10f, 10f, .2f, 1.6f, 2f, 100f)
-    private val steps = floatArrayOf(1f, 1f, 1f, .01f, .01f, .01f, 1f)
-    private val neutral = floatArrayOf(0f, 0f, 0f, 0f, 1f, 1f, 0f)
-    private val tints = intArrayOf(0xFFF0704F.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0xFF4FB3C4.toInt(), 0xFF4FB3C4.toInt(), 0xFF4FB3C4.toInt(), 0xFFE7B53C.toInt())
+    private val names = arrayOf("Red restore", "Green", "Blue", "Brightness", "Contrast", "Saturation", "Vibrance")
+    private val base = floatArrayOf(0f, 0f, 0f, 0f, 1f, 1f, 0f)
+    private val scale = floatArrayOf(1f, .3f, .4f, .002f, .004f, .01f, 1f)
+    private val dmin = floatArrayOf(0f, -100f, -100f, -100f, -100f, -100f, 0f)
+    private val dots = intArrayOf(0xFFE5604D.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0, 0, 0, 0)
     private val defaults = """{"Shallow 0-5 m":{"red":30,"green":0,"blue":-10,"bright":0,"contrast":1.05,"sat":1.05,"pop":20},"Medium 5-15 m":{"red":60,"green":-8,"blue":-20,"bright":0.02,"contrast":1.1,"sat":1.1,"pop":30},"Deep 15 m+":{"red":100,"green":-15,"blue":-30,"bright":0.04,"contrast":1.15,"sat":1.15,"pop":40}}"""
     @Suppress("DEPRECATION")
     private val exifTags = arrayOf(
@@ -101,35 +105,13 @@ class MainActivity : Activity() {
         ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER, ExifInterface.TAG_ISO_SPEED_RATINGS, ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
         ExifInterface.TAG_FOCAL_LENGTH, ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, ExifInterface.TAG_WHITE_BALANCE
     )
-    private val ink = 0xFFE3ECEE.toInt()
-    private val muted = 0xFF8FA3A9.toInt()
 
     /** Grid thumbnail: source pixels plus the last corrected rendering (ver = settings version it was rendered with). */
     class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, val outName: String, var phone: Boolean, var out: Bitmap?, var ver: Int)
 
-    /** Semi-transparent RGB histogram overlay. */
-    inner class Histo(ctx: Context) : View(ctx) {
-        var data: Array<IntArray>? = null
-            set(value) { field = value; invalidate() }
-        private val paints = intArrayOf(0x88FF5A4A.toInt(), 0x8850D070.toInt(), 0x885A8CFF.toInt()).map { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = it } }
-        private val path = Path()
-        init { background = GradientDrawable().apply { setColor(0x59000000); cornerRadius = 6 * resources.displayMetrics.density } }
-        override fun onDraw(c: Canvas) {
-            val d = data ?: return
-            val top = d.maxOf { h -> (1 until 63).maxOf { h[it] } }.coerceAtLeast(1)  // ignore clipped ends when scaling
-            val w = width.toFloat(); val hh = height.toFloat()
-            for (ch in 0..2) {
-                path.reset(); path.moveTo(0f, hh)
-                for (i in 0 until 64) path.lineTo(i * w / 63, hh - minOf(1f, d[ch][i].toFloat() / top) * hh * .92f)
-                path.lineTo(w, hh); path.close()
-                c.drawPath(path, paints[ch])
-            }
-        }
-    }
-
     private val n = ids.size
-    private val v = neutral.copyOf()
-    private val bars = arrayOfNulls<SeekBar>(n)
+    private val v = base.copyOf()
+    private val sliders = arrayOfNulls<Slider>(n)
     private val vals = arrayOfNulls<TextView>(n)
     private val dp by lazy { resources.displayMetrics.density }
     private var tablet = false
@@ -137,6 +119,9 @@ class MainActivity : Activity() {
     private var cur = 0
     private var single = false
     private var holding = false
+    private var applyingPreset = false
+    private var fileTitle = ""
+    private var fileSub = ""
     @Volatile private var renderSeq = 0
     @Volatile private var frameSeq = 0
     private var fileSeq = 0
@@ -162,6 +147,7 @@ class MainActivity : Activity() {
     private var failed = 0
     private var lastError: String? = null
     private var dest = 0  // 0 = phone, 1 = camera card, 2 = both
+    private var pendingDest = 0
     private var batchDest = 0
     @Volatile private var cardTree: Uri? = null
     @Volatile private var cardDir: Uri? = null  // the DiveFix folder on the card
@@ -169,50 +155,74 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("divefix", MODE_PRIVATE) }
     private lateinit var presets: JSONObject
+
+    private lateinit var root: View
+    private lateinit var toolbar: MaterialToolbar
     private lateinit var grid: GridView
     private lateinit var adapter: BaseAdapter
     private lateinit var singleBox: FrameLayout
     private lateinit var surface: SurfaceView
     private lateinit var image: ImageView
+    private lateinit var originalTag: TextView
+    private lateinit var prevBtn: Button
+    private lateinit var nextBtn: Button
     private lateinit var histo: Histo
-    private lateinit var badge: TextView
-    private lateinit var removeBtn: Button
-    private lateinit var fileLabel: TextView
-    private lateinit var singleCtrls: List<View>
-    private lateinit var videoRow: LinearLayout
-    private lateinit var playBtn: Button
-    private lateinit var seek: SeekBar
+    private lateinit var videoRow: View
+    private lateinit var playBtn: MaterialButton
+    private lateinit var timeline: Slider
     private lateinit var timeTv: TextView
+    private lateinit var chips: ChipGroup
+    private lateinit var bottomBar: View
+    private lateinit var destGroup: MaterialButtonToggleGroup
+    private lateinit var go: Button
+    private lateinit var idleRow: View
+    private lateinit var runRow: View
+    private lateinit var progress: LinearProgressIndicator
+    private lateinit var runText: TextView
     private lateinit var full: Dialog
     private lateinit var fullRoot: FrameLayout
     private lateinit var rotBox: FrameLayout
     private lateinit var fullImg: ImageView
     private lateinit var fullHisto: Histo
     private lateinit var fullHint: TextView
-    private lateinit var spinner: Spinner
-    private lateinit var bar: ProgressBar
-    private lateinit var status: TextView
-    private lateinit var pick: Button
-    private lateinit var go: Button
-    private lateinit var stop: Button
-    private lateinit var destSpinner: Spinner
-    private lateinit var cardBtn: Button
+    private lateinit var fullOriginal: TextView
+    private val destIds = intArrayOf(R.id.destPhone, R.id.destCard, R.id.destBoth)
 
+    private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) setFiles(it) }
+    private val cardPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { onCardChosen(it) }
+    private val backToGrid = object : OnBackPressedCallback(false) { override fun handleOnBackPressed() = exitSingle() }
     private val applyFx = Runnable { player?.setVideoEffects(if (holding) listOf() else listOf<Effect>(lut(matrix(), v[6] / 100f))) }
     private val ticker = object : Runnable {
         override fun run() {
             val p = player ?: return
             if (!p.playWhenReady) return
-            videoPos = p.currentPosition; seek.progress = videoPos.toInt(); timeTv.text = times()
+            videoPos = p.currentPosition
+            timeline.value = videoPos.toFloat().coerceIn(timeline.valueFrom, timeline.valueTo); timeTv.text = times()
             ui.postDelayed(this, 200)
         }
     }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
+        setContentView(R.layout.activity_main)
         tablet = resources.configuration.smallestScreenWidthDp >= 600
         requestedOrientation = if (tablet) ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        val pad = (12 * dp).toInt()
+        onBackPressedDispatcher.addCallback(this, backToGrid)
+        if (!tablet) findViewById<View>(R.id.media).layoutParams.height = resources.displayMetrics.widthPixels  // square: 3 x 3 grid
+
+        root = findViewById(R.id.root)
+        toolbar = findViewById(R.id.toolbar)
+        toolbar.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> filePicker.launch(arrayOf("image/*", "video/*"))
+                2 -> chooseCard()
+                3 -> removeCurrent()
+                4 -> setFiles(listOf())
+            }
+            true
+        }
+        toolbar.setNavigationOnClickListener { exitSingle() }
+        findViewById<View>(R.id.emptyAdd).setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) }
 
         // ---------- grid ----------
         adapter = object : BaseAdapter() {
@@ -226,194 +236,114 @@ class MainActivity : Activity() {
                 return cell
             }
         }
-        grid = GridView(this).apply {
-            if (tablet) { numColumns = GridView.AUTO_FIT; columnWidth = (140 * dp).toInt() } else numColumns = 3
-            horizontalSpacing = (2 * dp).toInt(); verticalSpacing = (2 * dp).toInt(); stretchMode = GridView.STRETCH_COLUMN_WIDTH
+        grid = findViewById<GridView>(R.id.grid).apply {
+            if (tablet) { numColumns = GridView.AUTO_FIT; columnWidth = (150 * dp).toInt() } else numColumns = 3
+            selector = GradientDrawable()  // no legacy highlight; cells have their own ripple
             adapter = this@MainActivity.adapter
+            emptyView = findViewById(R.id.empty)
             setOnItemClickListener { _, _, pos, _ -> cur = pos; enterSingle() }
         }
-        val emptyTv = TextView(this).apply {
-            text = "Pick files, or share photos and videos to DiveFix from your gallery"; gravity = Gravity.CENTER; setTextColor(muted); setPadding(pad * 2, 0, pad * 2, 0)
-        }
-        grid.emptyView = emptyTv
 
         // ---------- single view ----------
-        surface = SurfaceView(this).apply { visibility = View.GONE }
-        image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; contentDescription = "Preview, tap for full screen"; setOnClickListener { openFull() } }
-        histo = Histo(this)
-        badge = TextView(this).apply {
-            text = "✓ Fixed copy exists"; setTextColor(Color.WHITE); textSize = 13f; setPadding(pad, pad / 3, pad, pad / 3); visibility = View.GONE
-            background = GradientDrawable().apply { setColor(0xE01F7A8C.toInt()); cornerRadius = 6 * dp }
-        }
-        removeBtn = Button(this).apply { text = "✕ Remove"; alpha = .9f; setOnClickListener { removeCurrent() } }
-        val hw = if (tablet) 200 else 112
-        singleBox = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK); visibility = View.GONE
-            addView(surface, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
-            addView(image, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-            addView(histo, FrameLayout.LayoutParams((hw * dp).toInt(), (hw * dp / 2).toInt(), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, pad / 2, pad / 2) })
-            addView(badge, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.START).apply { setMargins(pad / 2, pad / 2, 0, 0) })
-            addView(removeBtn, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END))
-            addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> player?.let { fitSurface(it.videoSize) } }
-        }
-        val content = FrameLayout(this).apply {
-            addView(grid, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-            addView(emptyTv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-            addView(singleBox, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        }
-
-        // ---------- navigation + video controls ----------
-        val nav = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        val prev = Button(this).apply { text = "‹"; minWidth = 0; minimumWidth = (48 * dp).toInt(); setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } } }
-        val next = Button(this).apply { text = "›"; minWidth = 0; minimumWidth = (48 * dp).toInt(); setOnClickListener { if (files.isNotEmpty()) { cur = (cur + 1) % files.size; loadPreview() } } }
-        fileLabel = TextView(this).apply { setTextColor(muted); isSingleLine = true; ellipsize = TextUtils.TruncateAt.MIDDLE }
-        val holdBtn = Button(this).apply {
-            text = "Original"
-            setOnTouchListener { view, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> { hold(true) }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { hold(false); view.performClick() }
-                }
-                true
+        singleBox = findViewById(R.id.single)
+        surface = findViewById(R.id.surface)
+        image = findViewById<ImageView>(R.id.image).apply { setOnClickListener { openFull() } }
+        originalTag = findViewById(R.id.originalTag)
+        histo = findViewById(R.id.histo)
+        prevBtn = findViewById<Button>(R.id.prev).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } } }
+        nextBtn = findViewById<Button>(R.id.next).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur + 1) % files.size; loadPreview() } } }
+        findViewById<View>(R.id.compare).setOnTouchListener { view, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> { hold(true) }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { hold(false); view.performClick() }
             }
+            false  // let the button show its pressed state
         }
-        val gridBtn = Button(this).apply { text = "▦"; minWidth = 0; minimumWidth = (48 * dp).toInt(); setOnClickListener { exitSingle() } }
-        nav.addView(prev); nav.addView(fileLabel, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); nav.addView(next); nav.addView(holdBtn); nav.addView(gridBtn)
-        singleCtrls = listOf(prev, next, holdBtn, gridBtn)
-
-        playBtn = Button(this).apply { text = "▶"; minWidth = 0; minimumWidth = (48 * dp).toInt(); setOnClickListener { if (player?.playWhenReady == true) pause() else play() } }
-        seek = SeekBar(this).apply {
-            progressTintList = ColorStateList.valueOf(0xFF4FB3C4.toInt()); thumbTintList = progressTintList
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) {
-                    if (!user) return
-                    videoPos = p.toLong(); timeTv.text = times()
-                    if (player?.playWhenReady == true) player?.seekTo(videoPos) else loadFrame(false)
-                }
-                override fun onStartTrackingTouch(s: SeekBar) {}
-                override fun onStopTrackingTouch(s: SeekBar) { if (player?.playWhenReady != true) loadFrame(true) }
+        singleBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> player?.let { fitSurface(it.videoSize) } }
+        videoRow = findViewById(R.id.videoRow)
+        playBtn = findViewById<MaterialButton>(R.id.play).apply { setOnClickListener { if (player?.playWhenReady == true) pause() else play() } }
+        timeTv = findViewById(R.id.time)
+        timeline = findViewById<Slider>(R.id.timeline).apply {
+            addOnChangeListener { _, value, fromUser ->
+                if (!fromUser) return@addOnChangeListener
+                videoPos = value.toLong(); timeTv.text = times()
+                if (player?.playWhenReady == true) player?.seekTo(videoPos) else loadFrame(false)
+            }
+            addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                override fun onStartTrackingTouch(slider: Slider) {}
+                override fun onStopTrackingTouch(slider: Slider) { if (player?.playWhenReady != true) loadFrame(true) }
             })
         }
-        timeTv = TextView(this).apply { setTextColor(muted); textSize = 13f }
-        videoRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
-            addView(playBtn); addView(seek, LinearLayout.LayoutParams(0, (40 * dp).toInt(), 1f)); addView(timeTv)
-        }
 
-        // ---------- presets + sliders ----------
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val presetRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        spinner = Spinner(this)
-        presetRow.addView(spinner, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        presetRow.addView(Button(this).apply { text = "Save"; setOnClickListener { savePreset() } })
-        presetRow.addView(Button(this).apply { text = "Delete"; setOnClickListener { deletePreset() } })
-        box.addView(presetRow)
+        // ---------- adjustments: one compact row per slider ----------
+        val box = findViewById<LinearLayout>(R.id.sliders)
+        val muted = MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant, Color.GRAY)
         for (i in 0 until n) {
-            val label = TextView(this).apply { text = names[i]; setTextColor(ink); textSize = if (tablet) 13f else 15f }
-            vals[i] = TextView(this).apply { setTextColor(muted); textSize = if (tablet) 12f else 14f; gravity = Gravity.END }
-            bars[i] = SeekBar(this).apply {
-                max = ((maxs[i] - mins[i]) / steps[i]).roundToInt()
-                progressTintList = ColorStateList.valueOf(tints[i]); thumbTintList = ColorStateList.valueOf(tints[i])
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) {
-                        if (user) { v[i] = mins[i] + p * steps[i]; showValue(i); render() }
-                    }
-                    override fun onStartTrackingTouch(s: SeekBar) {}
-                    override fun onStopTrackingTouch(s: SeekBar) {}
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            row.addView(View(this).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dots[i]) }
+                visibility = if (dots[i] != 0) View.VISIBLE else View.INVISIBLE
+            }, LinearLayout.LayoutParams((8 * dp).toInt(), (8 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+            row.addView(TextView(this).apply {
+                text = names[i]; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+            }, LinearLayout.LayoutParams((92 * dp).toInt(), WRAP_CONTENT))
+            val s = Slider(this).apply {
+                valueFrom = dmin[i]; valueTo = 100f; stepSize = 1f; value = 0f
+                labelBehavior = LabelFormatter.LABEL_GONE; isTickVisible = false; contentDescription = names[i]
+                addOnChangeListener { _, value, fromUser -> if (fromUser) { v[i] = base[i] + value * scale[i]; showValue(i); userChanged() } }
+                val reset = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onDoubleTap(e: MotionEvent): Boolean { v[i] = base[i]; setSlider(i); userChanged(); return true }
                 })
+                setOnTouchListener { _, e -> reset.onTouchEvent(e); false }  // double-tap resets to neutral
             }
-            if (tablet) {  // compact: label, slider and value on one line
-                box.addView(LinearLayout(this).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(label, LinearLayout.LayoutParams((100 * dp).toInt(), WRAP_CONTENT))
-                    addView(bars[i], LinearLayout.LayoutParams(0, (32 * dp).toInt(), 1f))
-                    addView(vals[i], LinearLayout.LayoutParams((40 * dp).toInt(), WRAP_CONTENT))
-                }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = pad / 3 })
-            } else {
-                box.addView(LinearLayout(this).apply {
-                    addView(label, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); addView(vals[i])
-                }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = pad })
-                box.addView(bars[i], LinearLayout.LayoutParams(MATCH_PARENT, (36 * dp).toInt()))
+            sliders[i] = s
+            row.addView(s, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            vals[i] = TextView(this).apply {
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall); setTextColor(muted)
+                gravity = Gravity.END; fontFeatureSettings = "tnum"
             }
+            row.addView(vals[i], LinearLayout.LayoutParams((36 * dp).toInt(), WRAP_CONTENT))
+            box.addView(row)
+            setSlider(i)
         }
-        val scroll = ScrollView(this).apply { addView(box) }
 
-        // ---------- batch controls ----------
-        bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000; progressTintList = ColorStateList.valueOf(0xFF4FB3C4.toInt()) }
-        status = TextView(this).apply { setTextColor(muted); text = "Corrected files go to DCIM/DiveFix" }
-        val actions = LinearLayout(this)
-        pick = Button(this).apply {
-            text = "Pick files"
-            setOnClickListener {
-                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE)
-                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*")); putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                }, 1)
-            }
+        // ---------- presets ----------
+        presets = JSONObject(prefs.getString("presets", null) ?: defaults)
+        chips = findViewById(R.id.presets)
+        chips.setOnCheckedStateChangeListener { g, checked ->
+            if (applyingPreset || checked.isEmpty()) return@setOnCheckedStateChangeListener
+            applyPreset(g.findViewById<Chip>(checked[0]).text.toString())
         }
-        go = Button(this).apply {
-            text = "Correct 0 files"; isEnabled = false; setTextColor(Color.WHITE)
-            backgroundTintList = ColorStateList.valueOf(0xFFD9502F.toInt())
-            setOnClickListener { startBatch() }
-        }
-        stop = Button(this).apply { text = "Cancel"; visibility = View.GONE; setOnClickListener { cancelled = true; transformer?.cancel(); finishBatch() } }
-        actions.addView(pick); actions.addView(go, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); actions.addView(stop)
+        buildChips(presets.keys().asSequence().firstOrNull())
+        presets.keys().asSequence().firstOrNull()?.let { applyPreset(it) }
+
+        // ---------- bottom bar ----------
+        bottomBar = findViewById(R.id.bottomBar)
+        idleRow = findViewById(R.id.idleRow)
+        runRow = findViewById(R.id.runRow)
+        progress = findViewById(R.id.progress)
+        runText = findViewById(R.id.runText)
+        go = findViewById<Button>(R.id.go).apply { setOnClickListener { startBatch() } }
+        findViewById<View>(R.id.cancel).setOnClickListener { cancelled = true; transformer?.cancel(); finishBatch() }
         dest = prefs.getInt("dest", 0)
-        destSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf("Save to phone", "Save to camera card", "Save to phone + card"))
-            setSelection(dest)
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(p: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                    if (pos == dest) return
-                    if (pos > 0 && prefs.getString("cardTree", null) == null) { chooseCard(); return }  // dest is set once a folder is chosen
-                    dest = pos; prefs.edit().putInt("dest", pos).apply(); cardBtn.visibility = if (dest > 0) View.VISIBLE else View.GONE
-                }
-                override fun onNothingSelected(p: AdapterView<*>?) {}
-            }
-        }
-        cardBtn = Button(this).apply { text = "Card folder…"; visibility = if (dest > 0) View.VISIBLE else View.GONE; setOnClickListener { chooseCard() } }
-        val destRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(destSpinner, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); addView(cardBtn)
+        destGroup = findViewById(R.id.dest)
+        destGroup.check(destIds[dest])
+        destGroup.addOnButtonCheckedListener { _, id, checked ->
+            val pos = destIds.indexOf(id)
+            if (!checked || pos == dest) return@addOnButtonCheckedListener
+            if (pos > 0 && prefs.getString("cardTree", null) == null) { pendingDest = pos; chooseCard() } else setDest(pos)
         }
 
-        // ---------- layout: phone stacks everything, tablet puts a compact control panel beside a big grid ----------
-        val root: LinearLayout
-        if (tablet) {
-            val left = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(content, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)); addView(nav); addView(videoRow)
-            }
-            val right = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)); addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(status); addView(destRow); addView(actions)
-            }
-            root = LinearLayout(this).apply {
-                addView(left, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
-                addView(right, LinearLayout.LayoutParams((340 * dp).toInt(), MATCH_PARENT).apply { leftMargin = pad })
-            }
-        } else {
-            root = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(content, LinearLayout.LayoutParams(MATCH_PARENT, resources.displayMetrics.widthPixels - 2 * pad))  // square: 3x3 grid
-                addView(nav); addView(videoRow)
-                addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-                addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(status); addView(destRow); addView(actions)
-            }
-        }
-        root.apply { setBackgroundColor(0xFF0F1B20.toInt()); setPadding(pad, pad, pad, pad); fitsSystemWindows = true }
-        setContentView(root)
-
-        // ---------- full screen viewer: landscape images are turned to fill a portrait screen ----------
+        // ---------- full screen: landscape images are turned to fill a portrait screen ----------
         fullImg = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
         fullHisto = Histo(this)
-        fullHint = TextView(this).apply {
-            text = "Hold anywhere for original · Back to return"; setTextColor(Color.WHITE); setBackgroundColor(0x99000000.toInt()); setPadding(pad, pad / 2, pad, pad / 2)
-        }
+        fullHint = pillText("Hold anywhere to see the original · Back to return")
+        fullOriginal = pillText("Original").apply { visibility = View.GONE }
         rotBox = FrameLayout(this).apply {
             addView(fullImg, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-            addView(fullHisto, FrameLayout.LayoutParams((hw * dp).toInt(), (hw * dp / 2).toInt(), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, pad, pad) })
-            addView(fullHint, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = 4 * pad })
+            addView(fullOriginal, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = (24 * dp).toInt() })
+            addView(fullHisto, FrameLayout.LayoutParams(resources.getDimensionPixelSize(R.dimen.histo_w), resources.getDimensionPixelSize(R.dimen.histo_h), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, (16 * dp).toInt(), (16 * dp).toInt()) })
+            addView(fullHint, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = (88 * dp).toInt() })
         }
         fullRoot = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -427,23 +357,8 @@ class MainActivity : Activity() {
                 true
             }
         }
-        full = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply { setContentView(fullRoot) }
+        full = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply { setContentView(fullRoot); setOnDismissListener { hold(false) } }
 
-        presets = JSONObject(prefs.getString("presets", null) ?: defaults)
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                presets.optJSONObject(p?.getItemAtPosition(pos) as? String ?: return)?.let { o ->
-                    for (i in 0 until n) {
-                        v[i] = o.optDouble(ids[i], neutral[i].toDouble()).toFloat()
-                        bars[i]!!.progress = ((v[i] - mins[i]) / steps[i]).roundToInt()
-                        showValue(i)
-                    }
-                    render()
-                }
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-        refreshPresets(null)
         showMode()
         takeShared(intent)
     }
@@ -464,33 +379,9 @@ class MainActivity : Activity() {
         if (list.isNotEmpty()) setFiles(list)
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 2) {
-            val tree = data?.data
-            if (resultCode != RESULT_OK || tree == null) { destSpinner.setSelection(dest); return }
-            contentResolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            prefs.edit().putString("cardTree", tree.toString()).apply()
-            if (dest == 0) { dest = destSpinner.selectedItemPosition.coerceAtLeast(1); prefs.edit().putInt("dest", dest).apply() }
-            cardBtn.visibility = View.VISIBLE
-            thread {
-                val ok = openCard(true)
-                runOnUiThread { status.text = if (ok) "Card folder set: fixed files go to its DiveFix folder" else "Can't write to that folder"; adapter.notifyDataSetChanged(); refreshBadge() }
-            }
-            return
-        }
-        if (resultCode != RESULT_OK || data == null) return
-        setFiles(data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data))
-    }
-
-    @Deprecated("Back in the single view returns to the grid")
-    override fun onBackPressed() {
-        if (single) exitSingle() else @Suppress("DEPRECATION") super.onBackPressed()
-    }
-
     override fun onResume() {
         super.onResume()
-        thread { openCard(false); runOnUiThread { adapter.notifyDataSetChanged(); refreshBadge() } }  // the camera may have been plugged in meanwhile
+        thread { openCard(false); runOnUiThread { adapter.notifyDataSetChanged(); refreshFileInfo() } }  // the camera may have been plugged in meanwhile
     }
 
     override fun onPause() {
@@ -506,10 +397,23 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    private fun pillText(t: String) = TextView(this).apply {
+        text = t; setTextColor(Color.WHITE); setBackgroundResource(R.drawable.pill)
+        setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge); setTextColor(Color.WHITE)
+        setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+    }
+
+    private fun say(msg: String, action: String? = null, fn: (() -> Unit)? = null) {
+        Snackbar.make(root, msg, if (action != null) Snackbar.LENGTH_INDEFINITE else Snackbar.LENGTH_LONG).apply {
+            anchorView = bottomBar
+            if (action != null && fn != null) setAction(action) { fn() }
+        }.show()
+    }
+
     // ---------- selection & modes ----------
 
     private fun setFiles(list: List<Uri>) {
-        if (running) { status.text = "Wait for the current batch to finish first"; return }
+        if (running) { say("Wait for the current batch to finish first"); return }
         files = list
         cur = 0
         if (single) exitSingle()
@@ -519,16 +423,32 @@ class MainActivity : Activity() {
     }
 
     private fun updateCount() {
-        go.text = "Correct ${files.size} file${if (files.size == 1) "" else "s"}"
+        go.text = if (files.isEmpty()) "Correct" else "Correct ${files.size}"
         go.isEnabled = files.isNotEmpty() && !running
-        removeBtn.visibility = if (files.isNotEmpty() && !running) View.VISIBLE else View.GONE
-        if (!single) fileLabel.text = if (files.isEmpty()) "" else "${files.size} file${if (files.size == 1) "" else "s"} · tap one to enlarge"
+        updateToolbar()
+    }
+
+    private fun updateToolbar() {
+        val menu = toolbar.menu
+        menu.clear()
+        if (single) {
+            toolbar.setNavigationIcon(R.drawable.ic_arrow_back)
+            toolbar.navigationContentDescription = "Back to grid"
+            toolbar.title = fileTitle; toolbar.subtitle = fileSub
+            menu.add(0, 3, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        } else {
+            toolbar.navigationIcon = null
+            toolbar.title = "DiveFix"; toolbar.subtitle = if (files.isEmpty()) null else "${files.size} selected"
+            menu.add(0, 1, 0, "Add photos and videos").setIcon(R.drawable.ic_add).setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+            if (files.isNotEmpty()) menu.add(0, 4, 2, "Clear selection")
+        }
+        menu.add(0, 2, 1, "Camera card folder…")
+        for (k in 0 until menu.size()) menu.getItem(k).isEnabled = !running || menu.getItem(k).itemId == 2
     }
 
     private fun showMode() {
         singleBox.visibility = if (single) View.VISIBLE else View.GONE
-        singleCtrls.forEach { it.visibility = if (single) View.VISIBLE else View.GONE }
-        if (!single) videoRow.visibility = View.GONE
+        backToGrid.isEnabled = single
         updateCount()
     }
 
@@ -552,13 +472,84 @@ class MainActivity : Activity() {
         if (running || files.isEmpty()) return
         files = files.filterIndexed { k, _ -> k != cur }
         cur = cur.coerceAtMost(files.size - 1).coerceAtLeast(0)
-        updateCount()
         adapter.notifyDataSetChanged()
-        if (files.isEmpty()) exitSingle() else loadPreview()
+        if (files.isEmpty()) exitSingle() else { updateCount(); loadPreview() }
+    }
+
+    // ---------- sliders & presets ----------
+
+    private fun setSlider(i: Int) {
+        val d = ((v[i] - base[i]) / scale[i]).roundToInt().toFloat().coerceIn(dmin[i], 100f)
+        v[i] = base[i] + d * scale[i]
+        sliders[i]!!.value = d
+        showValue(i)
     }
 
     private fun showValue(i: Int) {
-        vals[i]!!.text = if (steps[i] >= 1f) "%.0f".format(v[i]) else "%.2f".format(v[i])
+        val d = ((v[i] - base[i]) / scale[i]).roundToInt()
+        vals[i]!!.text = if (d > 0 && dmin[i] < 0) "+$d" else "$d"
+    }
+
+    private fun userChanged() {
+        applyingPreset = true; chips.clearCheck(); applyingPreset = false  // settings no longer match a preset
+        render()
+    }
+
+    private fun applyPreset(name: String) {
+        val o = presets.optJSONObject(name) ?: return
+        for (i in 0 until n) { v[i] = o.optDouble(ids[i], base[i].toDouble()).toFloat(); setSlider(i) }
+        render()
+    }
+
+    private fun buildChips(select: String?) {
+        applyingPreset = true
+        chips.removeAllViews()
+        for (name in presets.keys().asSequence().toList()) {
+            val chip = layoutInflater.inflate(R.layout.chip_preset, chips, false) as Chip
+            chip.id = View.generateViewId(); chip.text = name
+            chip.setOnLongClickListener { presetMenu(name); true }
+            chips.addView(chip)
+            if (name == select) chip.isChecked = true
+        }
+        chips.addView((layoutInflater.inflate(R.layout.chip_add, chips, false) as Chip).apply { id = View.generateViewId(); setOnClickListener { askName("Save preset", "") { savePresetAs(it) } } })
+        applyingPreset = false
+    }
+
+    private fun currentAsJson() = JSONObject().apply { for (i in 0 until n) put(ids[i], v[i].toDouble()) }
+
+    private fun storePresets(select: String?) {
+        prefs.edit().putString("presets", presets.toString()).apply()
+        buildChips(select)
+    }
+
+    private fun savePresetAs(name: String) {
+        presets.put(name, currentAsJson())
+        storePresets(name)
+        say("Preset \"$name\" saved")
+    }
+
+    private fun presetMenu(name: String) {
+        MaterialAlertDialogBuilder(this).setTitle(name)
+            .setItems(arrayOf("Update with current settings", "Rename", "Delete")) { _, which ->
+                when (which) {
+                    0 -> { presets.put(name, currentAsJson()); storePresets(name); say("Preset \"$name\" updated") }
+                    1 -> askName("Rename preset", name) { new ->
+                        if (new != name) { presets.put(new, presets.getJSONObject(name)); presets.remove(name); storePresets(new) }
+                    }
+                    2 -> MaterialAlertDialogBuilder(this).setMessage("Delete preset \"$name\"?")
+                        .setPositiveButton("Delete") { _, _ -> presets.remove(name); storePresets(null) }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            }.show()
+    }
+
+    private fun askName(title: String, initial: String, done: (String) -> Unit) {
+        val input = TextInputEditText(this).apply { setText(initial); setSingleLine(); selectAll() }
+        val field = TextInputLayout(this).apply { hint = "Name"; addView(input) }
+        val box = FrameLayout(this).apply { setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), 0); addView(field) }
+        MaterialAlertDialogBuilder(this).setTitle(title).setView(box)
+            .setPositiveButton("Save") { _, _ -> input.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(done) }
+            .setNegativeButton("Cancel", null).show()
     }
 
     // ---------- colour pipeline ----------
@@ -628,36 +619,51 @@ class MainActivity : Activity() {
     }
 
     private fun hold(on: Boolean) {
+        if (holding == on) return
         holding = on
+        originalTag.visibility = if (on) View.VISIBLE else View.GONE
+        fullOriginal.visibility = originalTag.visibility
         display()
         if (player != null) { ui.removeCallbacks(applyFx); applyFx.run() }
     }
 
     // ---------- grid thumbnails ----------
 
-    private fun makeCell(): FrameLayout = object : FrameLayout(this) {
-        override fun onMeasure(w: Int, h: Int) = super.onMeasure(w, w)
-    }.apply {
-        setBackgroundColor(0xFF16252B.toInt())
-        addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        addView(TextView(context).apply {
-            setTextColor(Color.WHITE); textSize = 11f; setPadding((6 * dp).toInt(), (1 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt())
-            background = GradientDrawable().apply { setColor(0xE01F7A8C.toInt()); cornerRadius = 10 * dp }
-        }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
-        addView(TextView(context).apply {
-            setTextColor(Color.WHITE); textSize = 11f; setShadowLayer(4f, 0f, 0f, Color.BLACK); setPadding((5 * dp).toInt(), 0, 0, (3 * dp).toInt())
-        }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.START))
+    private fun makeCell(): FrameLayout {
+        val icon = { res: Int -> ImageView(this).apply { setImageResource(res); imageTintList = ColorStateList.valueOf(Color.WHITE) } }
+        val small = (14 * dp).toInt()
+        val ripple = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).run { val d = getDrawable(0); recycle(); d }
+        return object : FrameLayout(this) {
+            override fun onMeasure(w: Int, h: Int) = super.onMeasure(w, w)
+        }.apply {
+            setBackgroundColor(0xFF1D2021.toInt()); foreground = ripple
+            addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(LinearLayout(context).apply {  // where a fixed copy exists: phone and/or card
+                setBackgroundResource(R.drawable.pill); setPadding((5 * dp).toInt(), (3 * dp).toInt(), (5 * dp).toInt(), (3 * dp).toInt())
+                addView(icon(R.drawable.ic_phone), LinearLayout.LayoutParams(small, small))
+                addView(icon(R.drawable.ic_sd), LinearLayout.LayoutParams(small, small).apply { marginStart = (2 * dp).toInt() })
+            }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
+            addView(LinearLayout(context).apply {  // video length
+                gravity = Gravity.CENTER_VERTICAL; setBackgroundResource(R.drawable.scrim_bottom)
+                setPadding((6 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
+                addView(icon(R.drawable.ic_play), LinearLayout.LayoutParams(small, small))
+                addView(TextView(context).apply {
+                    setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall); setTextColor(Color.WHITE)
+                    fontFeatureSettings = "tnum"; setPadding((3 * dp).toInt(), 0, 0, 0)
+                })
+            }, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
+        }
     }
 
     private fun cellFor(uri: Uri) = (0 until grid.childCount).map { grid.getChildAt(it) }.firstOrNull { it.tag == uri } as? FrameLayout
 
     private fun bindCell(cell: FrameLayout, uri: Uri) {
         val img = cell.getChildAt(0) as ImageView
-        val fixedTv = cell.getChildAt(1) as TextView
-        val durTv = cell.getChildAt(2) as TextView
+        val where = cell.getChildAt(1) as LinearLayout
+        val vid = cell.getChildAt(2) as LinearLayout
         val t = thumbs.get(uri)
         if (t == null) {
-            img.setImageBitmap(null); fixedTv.visibility = View.GONE; durTv.visibility = View.GONE
+            img.setImageBitmap(null); where.visibility = View.GONE; vid.visibility = View.GONE
             if (loading.add(uri)) {
                 val seq = renderSeq; val m = matrix(); val pop = v[6] / 100f
                 thumbLoader.execute {
@@ -668,10 +674,12 @@ class MainActivity : Activity() {
             return
         }
         img.setImageBitmap(t.out)
-        val ft = fixedText(t.phone, cardFiles.containsKey(t.outName), true)
-        fixedTv.text = ft; fixedTv.visibility = if (ft != null) View.VISIBLE else View.GONE
-        durTv.visibility = if (t.dur >= 0) View.VISIBLE else View.GONE
-        durTv.text = "▶ %d:%02d".format(t.dur / 60000, t.dur / 1000 % 60)
+        val card = cardFiles.containsKey(t.outName)
+        where.visibility = if (t.phone || card) View.VISIBLE else View.GONE
+        where.getChildAt(0).visibility = if (t.phone) View.VISIBLE else View.GONE
+        where.getChildAt(1).visibility = if (card) View.VISIBLE else View.GONE
+        vid.visibility = if (t.dur >= 0) View.VISIBLE else View.GONE
+        (vid.getChildAt(1) as TextView).text = "%d:%02d".format(t.dur / 60000, t.dur / 1000 % 60)
         if (t.ver != renderSeq) renderThumbs(listOf(uri), matrix(), v[6] / 100f, renderSeq)
     }
 
@@ -721,13 +729,15 @@ class MainActivity : Activity() {
         val video = isVideo(uri)
         val fs = ++fileSeq
         val seq = ++frameSeq
-        fileLabel.text = "${cur + 1}/${files.size}  ${nameOf(uri)}"
-        badge.visibility = View.GONE
-        refreshBadge()
+        fileTitle = nameOf(uri); fileSub = "${cur + 1} of ${files.size}"
+        updateToolbar()
+        refreshFileInfo()
+        prevBtn.visibility = if (files.size > 1) View.VISIBLE else View.GONE
+        nextBtn.visibility = prevBtn.visibility
         videoRow.visibility = if (video) View.VISIBLE else View.GONE
         srcBmp = null; srcPx = null; outBmp = null; srcHist = null; outHist = null
         image.setImageBitmap(null); histo.data = null
-        videoPos = 0; videoDur = 0; seek.progress = 0; timeTv.text = ""
+        videoPos = 0; videoDur = 0; timeline.value = 0f; timeline.valueTo = 1f; timeTv.text = ""
         if (video) {
             frameExec.execute {
                 mmr?.release(); mmr = null
@@ -735,7 +745,7 @@ class MainActivity : Activity() {
                 val r = runCatching { MediaMetadataRetriever().apply { setDataSource(this@MainActivity, uri) } }.getOrNull()
                 mmr = r
                 val d = r?.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                runOnUiThread { if (fs == fileSeq) { videoDur = d; seek.max = d.toInt(); timeTv.text = times(); loadFrame(true) } }
+                runOnUiThread { if (fs == fileSeq) { videoDur = d; timeline.valueTo = maxOf(1f, d.toFloat()); timeTv.text = times(); loadFrame(true) } }
             }
         } else {
             frameExec.execute {
@@ -771,7 +781,7 @@ class MainActivity : Activity() {
         val h = px?.let { hist(it) }
         runOnUiThread {
             if (seq != frameSeq) return@runOnUiThread
-            if (bmp == null) { status.text = "Can't preview this file"; return@runOnUiThread }
+            if (bmp == null) { say("Can't open ${fileTitle}"); return@runOnUiThread }
             srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
             if (player?.playWhenReady != true) { image.visibility = View.VISIBLE; histo.visibility = View.VISIBLE }
             if (full.isShowing) orientFull()
@@ -784,7 +794,7 @@ class MainActivity : Activity() {
     // ---------- video playback (live correction through the same LUT as the export) ----------
 
     private fun play() {
-        if (running) { status.text = "Playback is off while a batch is running"; return }
+        if (running) { say("Playback is paused while files are being corrected"); return }
         if (videoDur > 0 && videoPos >= videoDur - 200) videoPos = 0
         var p = player
         if (p == null) {
@@ -795,9 +805,12 @@ class MainActivity : Activity() {
             p.addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { if (player?.playWhenReady == true) image.visibility = View.INVISIBLE }
                 override fun onVideoSizeChanged(videoSize: VideoSize) { fitSurface(videoSize) }
-                override fun onIsPlayingChanged(isPlaying: Boolean) { playBtn.text = if (isPlaying) "❚❚" else "▶" }
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    playBtn.setIconResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play)
+                    playBtn.contentDescription = if (isPlaying) "Pause" else "Play"
+                }
                 override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) pause() }
-                override fun onPlayerError(error: PlaybackException) { status.text = "Playback failed: ${error.errorCodeName}"; releasePlayer(); loadFrame(true) }
+                override fun onPlayerError(error: PlaybackException) { say("Can't play this video (${error.errorCodeName})"); releasePlayer(); loadFrame(true) }
             })
             p.setMediaItem(MediaItem.fromUri(files[cur]))
             p.prepare()
@@ -813,8 +826,8 @@ class MainActivity : Activity() {
     private fun pause() {
         val p = player ?: return
         p.pause()
-        videoPos = p.currentPosition.coerceAtMost(videoDur)
-        seek.progress = videoPos.toInt(); timeTv.text = times()
+        videoPos = p.currentPosition.coerceIn(0L, videoDur)
+        timeline.value = videoPos.toFloat().coerceIn(timeline.valueFrom, timeline.valueTo); timeTv.text = times()
         loadFrame(true)  // the paused frame gets the exact CPU pipeline, histogram and full-screen view
     }
 
@@ -830,7 +843,7 @@ class MainActivity : Activity() {
         ui.removeCallbacks(ticker); ui.removeCallbacks(applyFx)
         player?.release(); player = null
         surface.visibility = View.GONE
-        playBtn.text = "▶"
+        playBtn.setIconResource(R.drawable.ic_play); playBtn.contentDescription = "Play"
         image.visibility = View.VISIBLE; histo.visibility = View.VISIBLE
     }
 
@@ -855,12 +868,14 @@ class MainActivity : Activity() {
         rotBox.rotation = if (rotate) 90f else 0f
     }
 
-    // ---------- helpers ----------
+    // ---------- files & destinations ----------
 
     private fun nameOf(uri: Uri): String =
         contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "file"
 
     private fun isVideo(uri: Uri) = contentResolver.getType(uri)?.startsWith("video") == true
+
+    private fun outName(uri: Uri, video: Boolean) = nameOf(uri).substringBeforeLast('.') + "_fix" + if (video) ".mp4" else ".jpg"
 
     // Our earlier output for this file in DCIM/DiveFix, if any (only files DiveFix created are visible to it).
     private fun existing(fileName: String, video: Boolean): Uri? {
@@ -872,16 +887,8 @@ class MainActivity : Activity() {
         )?.use { if (it.moveToFirst()) ContentUris.withAppendedId(col, it.getLong(0)) else null }
     }
 
-    private fun outName(uri: Uri, video: Boolean) = nameOf(uri).substringBeforeLast('.') + "_fix" + if (video) ".mp4" else ".jpg"
-
-    private fun fixedText(phone: Boolean, card: Boolean, short: Boolean) = when {
-        phone && card -> if (short) "✓ P+C" else "✓ Fixed on phone + card"
-        phone -> if (short) "✓ P" else "✓ Fixed on phone"
-        card -> if (short) "✓ C" else "✓ Fixed on card"
-        else -> null
-    }
-
-    private fun refreshBadge() {
+    // Toolbar subtitle in the single view: position plus where a fixed copy already exists.
+    private fun refreshFileInfo() {
         if (files.isEmpty() || !single) return
         val uri = files[cur]
         val fs = fileSeq
@@ -889,14 +896,34 @@ class MainActivity : Activity() {
             val video = isVideo(uri)
             val name = outName(uri, video)
             val phone = runCatching { existing(name, video) != null }.getOrDefault(false)
-            val text = fixedText(phone, cardFiles.containsKey(name), false)
-            runOnUiThread { if (fs == fileSeq) { badge.text = text; badge.visibility = if (text != null) View.VISIBLE else View.GONE } }
+            val card = cardFiles.containsKey(name)
+            val where = when { phone && card -> " · fixed on phone and card"; phone -> " · fixed on phone"; card -> " · fixed on card"; else -> "" }
+            runOnUiThread { if (fs == fileSeq) { fileSub = "${cur + 1} of ${files.size}$where"; toolbar.subtitle = fileSub } }
         }
     }
 
+    private fun setDest(pos: Int) {
+        dest = pos
+        prefs.edit().putInt("dest", pos).apply()
+    }
+
     private fun chooseCard() {
-        status.text = "Choose the camera card (its top folder). DiveFix creates a DiveFix folder there."
-        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), 2)
+        say("Choose the camera card's top folder. DiveFix saves into a DiveFix folder there.")
+        cardPicker.launch(null)
+    }
+
+    private fun onCardChosen(tree: Uri?) {
+        if (tree == null) { destGroup.check(destIds[dest]); return }
+        contentResolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        prefs.edit().putString("cardTree", tree.toString()).apply()
+        if (pendingDest > 0) { setDest(pendingDest); pendingDest = 0 }
+        thread {
+            val ok = openCard(true)
+            runOnUiThread {
+                say(if (ok) "Camera card ready. Fixed files go to its DiveFix folder." else "DiveFix can't write to that folder")
+                adapter.notifyDataSetChanged(); refreshFileInfo()
+            }
+        }
     }
 
     // Finds (or creates) the DiveFix folder on the saved card and lists what is in it. False if the card isn't reachable.
@@ -951,52 +978,23 @@ class MainActivity : Activity() {
         if (r.isSuccess) saved++ else { failed++; lastError = r.exceptionOrNull()?.message }
     }
 
-    private fun refreshPresets(select: String?) {
-        val list = presets.keys().asSequence().toList()
-        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, list)
-        if (select != null && select in list) spinner.setSelection(list.indexOf(select))
-    }
-
-    private fun savePreset() {
-        val input = EditText(this).apply { setText(spinner.selectedItem as? String ?: ""); selectAll() }
-        AlertDialog.Builder(this).setTitle("Save preset").setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isEmpty()) return@setPositiveButton
-                presets.put(name, JSONObject().apply { for (i in 0 until n) put(ids[i], v[i].toDouble()) })
-                prefs.edit().putString("presets", presets.toString()).apply()
-                refreshPresets(name)
-            }
-            .setNegativeButton("Cancel", null).show()
-    }
-
-    private fun deletePreset() {
-        val name = spinner.selectedItem as? String ?: return
-        AlertDialog.Builder(this).setMessage("Delete preset \"$name\"?")
-            .setPositiveButton("Delete") { _, _ ->
-                presets.remove(name)
-                prefs.edit().putString("presets", presets.toString()).apply()
-                refreshPresets(null)
-            }
-            .setNegativeButton("Cancel", null).show()
-    }
-
     // ---------- batch export ----------
 
     private fun startBatch() {
         releasePlayer()
         running = true; cancelled = false; saved = 0; failed = 0; lastError = null; batchDest = dest
-        go.isEnabled = false; pick.isEnabled = false; destSpinner.isEnabled = false; removeBtn.visibility = View.GONE
+        go.isEnabled = false; destGroup.isEnabled = false; updateToolbar()
         val m = matrix(); val pop = v[6] / 100f
         thread {
             val ok = batchDest == 0 || openCard(true)
             runOnUiThread {
                 if (!ok) {
-                    running = false; pick.isEnabled = true; destSpinner.isEnabled = true; updateCount()
-                    status.text = "Camera card not reachable. Connect the camera in USB mode, or tap Card folder… to choose it again."
+                    running = false; destGroup.isEnabled = true; updateCount()
+                    say("Camera card not found. Connect the camera in USB mode.", "Choose card") { chooseCard() }
                     return@runOnUiThread
                 }
-                stop.visibility = View.VISIBLE
+                idleRow.visibility = View.GONE; runRow.visibility = View.VISIBLE
+                progress.setProgressCompat(0, false)
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 process(0, m, pop)
             }
@@ -1006,12 +1004,14 @@ class MainActivity : Activity() {
     private fun finishBatch() {
         running = false; transformer = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        pick.isEnabled = true; destSpinner.isEnabled = true; stop.visibility = View.GONE
-        updateCount(); refreshBadge()
-        if (!cancelled) bar.progress = 1000
-        status.text = (if (cancelled) "Stopped. " else "Done. ") + "$saved saved to " + listOf("phone (DCIM/DiveFix)", "camera card (DiveFix)", "phone + card")[batchDest] +
-            (if (failed > 0) ", $failed failed" + (lastError?.let { " ($it)" } ?: "") else "")
-        val snap = thumbs.snapshot()  // refresh the ✓ marks in the grid
+        idleRow.visibility = View.VISIBLE; runRow.visibility = View.GONE
+        destGroup.isEnabled = true
+        updateCount(); refreshFileInfo()
+        val where = listOf("phone", "camera card", "phone and card")[batchDest]
+        val msg = (if (cancelled) "Stopped. " else "") + "$saved saved to $where" +
+            (if (failed > 0) ". $failed failed" + (lastError?.let { ": $it" } ?: "") else "")
+        if (failed > 0) say(msg, "OK") {} else say(msg)
+        val snap = thumbs.snapshot()  // refresh the location marks in the grid
         thread {
             snap.forEach { (_, t) -> t.phone = runCatching { existing(t.outName, t.dur >= 0) != null }.getOrDefault(t.phone) }
             runOnUiThread { adapter.notifyDataSetChanged() }
@@ -1024,8 +1024,8 @@ class MainActivity : Activity() {
         val uri = files[i]
         val name = nameOf(uri)
         val base = name.substringBeforeLast('.') + "_fix"
-        status.text = "${i + 1} of ${files.size}: $name"
-        bar.progress = i * 1000 / files.size
+        runText.text = "${i + 1} of ${files.size} · $name"
+        progress.setProgressCompat(i * 1000 / files.size, true)
 
         if (!isVideo(uri)) {
             thread {
@@ -1104,8 +1104,8 @@ class MainActivity : Activity() {
             override fun run() {
                 if (!running || transformer !== t) return
                 if (t.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE) {
-                    bar.progress = (i * 1000 + holder.progress * 10) / files.size
-                    status.text = "${i + 1} of ${files.size}: $name  ${holder.progress}%"
+                    progress.setProgressCompat((i * 1000 + holder.progress * 10) / files.size, true)
+                    runText.text = "${i + 1} of ${files.size} · $name · ${holder.progress}%"
                 }
                 ui.postDelayed(this, 500)
             }

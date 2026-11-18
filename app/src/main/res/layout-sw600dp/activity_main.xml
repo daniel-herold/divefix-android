@@ -1,0 +1,17 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="?attr/colorSurface" android:fitsSystemWindows="true" android:orientation="horizontal">
+    <LinearLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:orientation="vertical">
+        <com.google.android.material.appbar.MaterialToolbar android:id="@+id/toolbar" android:layout_width="match_parent"
+            android:layout_height="?attr/actionBarSize" />
+        <include android:id="@+id/media" layout="@layout/media" android:layout_width="match_parent" android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+    <View android:layout_width="1dp" android:layout_height="match_parent" android:background="?attr/colorOutlineVariant" />
+    <LinearLayout android:layout_width="360dp" android:layout_height="match_parent" android:orientation="vertical">
+        <TextView android:layout_width="match_parent" android:layout_height="?attr/actionBarSize" android:gravity="center_vertical"
+            android:paddingHorizontal="16dp" android:text="Adjust" android:textAppearance="?attr/textAppearanceTitleMedium" />
+        <include layout="@layout/adjust" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <include layout="@layout/bottom_bar" android:layout_width="match_parent" android:layout_height="wrap_content" />
+    </LinearLayout>
+</LinearLayout>

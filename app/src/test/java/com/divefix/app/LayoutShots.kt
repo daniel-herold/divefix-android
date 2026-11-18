@@ -1,0 +1,118 @@
+package com.divefix.app
+
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Shader
+import android.view.Gravity
+import android.view.View
+import android.widget.BaseAdapter
+import android.widget.FrameLayout
+import android.widget.GridView
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import app.cash.paparazzi.DeviceConfig
+import app.cash.paparazzi.Paparazzi
+import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
+import com.google.android.material.slider.LabelFormatter
+import com.google.android.material.slider.Slider
+import org.junit.Rule
+import org.junit.Test
+
+class LayoutShots {
+    @get:Rule val paparazzi = Paparazzi(deviceConfig = DeviceConfig.PIXEL_5, theme = "Theme.DiveFix")
+
+    private fun fake(w: Int, h: Int, seed: Int) = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also {
+        val c = Canvas(it); val p = Paint()
+        p.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), Color.rgb(40 + seed * 9, 120 + seed * 5, 140), Color.rgb(10, 40 + seed * 4, 70), Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        p.shader = null; p.color = Color.rgb(200, 120 + seed * 7, 80); c.drawCircle(w * .4f + seed * 9, h * .55f, h * .12f, p)
+    }
+
+    private fun fill(root: View, singleView: Boolean, columns: Int = 3) {
+        val ctx = root.context; val dp = ctx.resources.displayMetrics.density
+        root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
+            if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.MP4"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
+            else { title = "DiveFix"; subtitle = "12 selected"; menu.add("Add").setIcon(R.drawable.ic_add).setShowAsAction(2) }
+            menu.add("Camera card folder…")
+        }
+        val grid = root.findViewById<GridView>(R.id.grid)
+        grid.numColumns = columns
+        grid.adapter = object : BaseAdapter() {
+            override fun getCount() = 24
+            override fun getItem(p: Int) = p
+            override fun getItemId(p: Int) = p.toLong()
+            override fun getView(p: Int, c: View?, parent: android.view.ViewGroup) = object : FrameLayout(ctx) {
+                override fun onMeasure(w: Int, h: Int) = super.onMeasure(w, w)
+            }.apply {
+                addView(ImageView(ctx).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setImageBitmap(fake(300, 300, p)) })
+                if (p % 3 == 0) addView(LinearLayout(ctx).apply {
+                    setBackgroundResource(R.drawable.pill); setPadding((5 * dp).toInt(), (3 * dp).toInt(), (5 * dp).toInt(), (3 * dp).toInt())
+                    addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_phone); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
+                    if (p % 2 == 0) addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_sd); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
+                }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
+                if (p == 1 || p == 5) addView(LinearLayout(ctx).apply {
+                    gravity = Gravity.CENTER_VERTICAL; setBackgroundResource(R.drawable.scrim_bottom); setPadding((6 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
+                    addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_play); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
+                    addView(TextView(ctx).apply { text = "0:42"; setTextColor(Color.WHITE); setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall); setTextColor(Color.WHITE) })
+                }, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+            }
+        }
+        root.findViewById<View>(R.id.empty).visibility = View.GONE
+        if (singleView) {
+            root.findViewById<View>(R.id.single).visibility = View.VISIBLE
+            root.findViewById<ImageView>(R.id.image).setImageBitmap(fake(1280, 720, 3))
+            root.findViewById<View>(R.id.videoRow).visibility = View.VISIBLE
+            root.findViewById<TextView>(R.id.time).text = "0:12 / 0:42"
+            root.findViewById<Slider>(R.id.timeline).apply { valueTo = 42f; value = 12f }
+            root.findViewById<Histo>(R.id.histo).data = Array(3) { ch -> IntArray(64) { i -> (1000 * Math.exp(-Math.pow((i - 20.0 - ch * 8) / 9.0, 2.0))).toInt() + 20 } }
+        }
+        val chips = root.findViewById<ChipGroup>(R.id.presets)
+        listOf("Shallow 0-5 m", "Medium 5-15 m", "Deep 15 m+").forEachIndexed { k, n ->
+            val chip = android.view.LayoutInflater.from(ctx).inflate(R.layout.chip_preset, chips, false) as Chip
+            chip.text = n; chip.id = View.generateViewId(); chips.addView(chip); if (k == 1) chip.isChecked = true
+        }
+        chips.addView(android.view.LayoutInflater.from(ctx).inflate(R.layout.chip_add, chips, false))
+        val box = root.findViewById<LinearLayout>(R.id.sliders)
+        val names = arrayOf("Red restore", "Green", "Blue", "Brightness", "Contrast", "Saturation", "Vibrance")
+        val values = floatArrayOf(60f, -27f, -50f, 10f, 25f, 10f, 30f)
+        val dots = intArrayOf(0xFFE5604D.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0, 0, 0, 0)
+        for (i in names.indices) {
+            val row = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL }
+            row.addView(View(ctx).apply { background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(dots[i]) }; visibility = if (dots[i] != 0) View.VISIBLE else View.INVISIBLE },
+                LinearLayout.LayoutParams((8 * dp).toInt(), (8 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+            row.addView(TextView(ctx).apply { text = names[i]; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium) }, LinearLayout.LayoutParams((92 * dp).toInt(), -2))
+            row.addView(Slider(ctx).apply { valueFrom = if (i == 0 || i == 6) 0f else -100f; valueTo = 100f; stepSize = 1f; value = values[i]; labelBehavior = LabelFormatter.LABEL_GONE; isTickVisible = false }, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(TextView(ctx).apply { text = values[i].toInt().let { if (it > 0 && i in 1..5) "+$it" else "$it" }; gravity = Gravity.END; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall); setTextColor(0xFFA8B0B2.toInt()) }, LinearLayout.LayoutParams((36 * dp).toInt(), -2))
+            box.addView(row)
+        }
+        root.findViewById<MaterialButtonToggleGroup>(R.id.dest).check(R.id.destBoth)
+        root.findViewById<TextView>(R.id.go).apply { text = "Correct 12"; isEnabled = true }
+    }
+
+    @Test fun tablet() {
+        paparazzi.unsafeUpdateConfig(deviceConfig = DeviceConfig.PIXEL_C)
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        root.findViewById<GridView>(R.id.grid).apply { numColumns = GridView.AUTO_FIT; columnWidth = (150 * root.resources.displayMetrics.density).toInt() }
+        fill(root, false, GridView.AUTO_FIT)
+        paparazzi.snapshot(root)
+    }
+
+    @Test fun grid() {
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
+        fill(root, false); paparazzi.snapshot(root)
+    }
+
+    @Test fun single() {
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
+        fill(root, true); paparazzi.snapshot(root)
+    }
+}
