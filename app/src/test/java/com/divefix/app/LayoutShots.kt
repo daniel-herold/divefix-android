@@ -35,7 +35,7 @@ class LayoutShots {
         p.shader = null; p.color = Color.rgb(200, 120 + seed * 7, 80); c.drawCircle(w * .4f + seed * 9, h * .55f, h * .12f, p)
     }
 
-    private fun fill(root: View, singleView: Boolean, columns: Int = 3) {
+    private fun fill(root: View, singleView: Boolean, columns: Int = 3, sel: Set<Int> = emptySet()) {
         val ctx = root.context; val dp = ctx.resources.displayMetrics.density
         root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
             if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.JPG"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
@@ -61,6 +61,14 @@ class LayoutShots {
                     setBackgroundResource(R.drawable.pill); setPadding((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
                     addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_asterisk) }, FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt()))
                 }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, 0) })
+                if (p in sel) addView(FrameLayout(ctx).apply {
+                    background = android.graphics.drawable.GradientDrawable().apply { setColor(0x406CCFDD); setStroke((3 * dp).toInt(), 0xFF6CCFDD.toInt()) }
+                    addView(ImageView(ctx).apply {
+                        setImageResource(R.drawable.ic_check); setPadding((3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt())
+                        imageTintList = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
+                        background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(0xFF6CCFDD.toInt()) }
+                    }, FrameLayout.LayoutParams((22 * dp).toInt(), (22 * dp).toInt(), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, (6 * dp).toInt(), (6 * dp).toInt()) })
+                }, FrameLayout.LayoutParams(-1, -1))
                 if (p == 1 || p == 5) addView(LinearLayout(ctx).apply {
                     gravity = Gravity.CENTER_VERTICAL; setBackgroundResource(R.drawable.scrim_bottom); setPadding((6 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
                     addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_play); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
@@ -84,7 +92,21 @@ class LayoutShots {
             icon.setImageResource(R.drawable.ic_photos); icon.imageTintList = android.content.res.ColorStateList.valueOf(0xFFE1E3E3.toInt())
             title.text = "All files"; sub.text = "Changes apply to all except 2 individually edited (✱)"
             title.setTextColor(0xFFE1E3E3.toInt()); sub.setTextColor(0xFFA8B0B2.toInt())
-            root.findViewById<View>(R.id.addMore).visibility = View.VISIBLE
+            root.findViewById<View>(R.id.addMore).visibility = if (sel.isEmpty()) View.VISIBLE else View.GONE
+            root.findViewById<View>(R.id.gridCompare).apply {
+                visibility = View.VISIBLE
+                (layoutParams as FrameLayout.LayoutParams).marginEnd = ((if (sel.isEmpty()) 84 else 16) * dp).toInt()
+            }
+            if (sel.isNotEmpty()) {
+                root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
+                    menu.clear(); setNavigationIcon(R.drawable.ic_close); this.title = "${sel.size} selected"; this.subtitle = null
+                    menu.add("Remove").setShowAsAction(2); menu.add("Select all")
+                }
+                bar.background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF004F58.toInt()); cornerRadius = 12 * dp }
+                icon.setImageResource(R.drawable.ic_tune); icon.imageTintList = android.content.res.ColorStateList.valueOf(0xFFA2EEFF.toInt())
+                title.text = "Only the ${sel.size} selected"; sub.text = "Each change is set on all selected files and makes them individual (✱)"
+                title.setTextColor(0xFFA2EEFF.toInt()); sub.setTextColor(0xFFA2EEFF.toInt())
+            }
         }
         if (singleView) {
             root.findViewById<View>(R.id.single).visibility = View.VISIBLE
@@ -144,6 +166,12 @@ class LayoutShots {
         val root = paparazzi.inflate<View>(R.layout.activity_main)
         root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
         fill(root, false); paparazzi.snapshot(root)
+    }
+
+    @Test fun selection() {
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
+        fill(root, false, sel = setOf(1, 3, 4)); paparazzi.snapshot(root)
     }
 
     @Test fun single() {

@@ -87,6 +87,7 @@ import android.graphics.drawable.ColorDrawable
 import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.widget.PopupWindow
+import android.widget.ScrollView
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -120,7 +121,10 @@ class MainActivity : AppCompatActivity() {
     )
 
     /** Grid thumbnail: source pixels plus the last corrected rendering (ver = settings version it was rendered with). */
-    class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, val outName: String, var phone: Boolean, var out: Bitmap?, var key: Int)
+    class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, val outName: String, var phone: Boolean, var out: Bitmap?, var key: Int) {
+        var orig: Bitmap? = null  // uncorrected, made on demand for "hold to compare" in the grid
+        fun original() = orig ?: (if (w > 0) Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888) else null).also { orig = it }
+    }
 
     /** Individual settings for one file: slider values plus an optional gradient line (x0, y0, x1, y1 in 0..1 image coordinates). */
     class Edit(val v: FloatArray, var line: FloatArray? = null)
@@ -130,6 +134,8 @@ class MainActivity : AppCompatActivity() {
     private var v = g  // what the sliders edit: g in the grid, the shown file's own settings in the single view
     private val edits = HashMap<Uri, Edit>()  // individually edited files
     private val videoOf = HashMap<Uri, Boolean>()
+    private val selected = LinkedHashSet<Uri>()  // multi-select in the grid (long-press)
+    private val selecting get() = selected.isNotEmpty()
     private val sliders = arrayOfNulls<Slider>(n)
     private val vals = arrayOfNulls<TextView>(n)
     private val dp by lazy { resources.displayMetrics.density }
@@ -195,6 +201,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gradientDiscard: View
     private var drawMode = false
     private lateinit var addMore: View
+    private lateinit var gridCompare: View
     private lateinit var emptyBox: View
     private lateinit var modeBar: LinearLayout
     private lateinit var modeIcon: ImageView
@@ -224,7 +231,7 @@ class MainActivity : AppCompatActivity() {
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) addFiles(it) }
     private val cardPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { onCardChosen(it) }
-    private val backToGrid = object : OnBackPressedCallback(false) { override fun handleOnBackPressed() = exitSingle() }
+    private val backToGrid = object : OnBackPressedCallback(false) { override fun handleOnBackPressed() = if (selecting) clearSelection() else exitSingle() }
     private val applyFx = Runnable { player?.setVideoEffects(if (holding) listOf() else listOf<Effect>(lut(matrix(), v[6] / 100f))) }
     private val ticker = object : Runnable {
         override fun run() {
@@ -251,13 +258,18 @@ class MainActivity : AppCompatActivity() {
                 2 -> chooseCard()
                 3 -> removeCurrent()
                 4 -> setFiles(listOf())
+                5 -> { selected.addAll(files); selectionChanged() }
+                6 -> removeSelected()
+                7 -> showHelp()
+                8 -> showAbout()
             }
             true
         }
-        toolbar.setNavigationOnClickListener { exitSingle() }
+        toolbar.setNavigationOnClickListener { if (selecting) clearSelection() else exitSingle() }
         findViewById<View>(R.id.emptyAdd).setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) }
         emptyBox = findViewById(R.id.empty)
         addMore = findViewById<View>(R.id.addMore).apply { setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) } }
+        gridCompare = findViewById(R.id.gridCompare)
 
         // ---------- grid ----------
         adapter = object : BaseAdapter() {
@@ -275,7 +287,8 @@ class MainActivity : AppCompatActivity() {
             if (tablet) { numColumns = GridView.AUTO_FIT; columnWidth = (150 * dp).toInt() } else numColumns = 3
             selector = GradientDrawable()  // no legacy highlight; cells have their own ripple
             adapter = this@MainActivity.adapter
-            setOnItemClickListener { _, _, pos, _ -> cur = pos; enterSingle() }
+            setOnItemClickListener { _, _, pos, _ -> if (selecting) toggle(files[pos]) else { cur = pos; enterSingle() } }
+            setOnItemLongClickListener { _, _, pos, _ -> toggle(files[pos]); true }
         }
 
         // ---------- single view ----------
@@ -297,13 +310,15 @@ class MainActivity : AppCompatActivity() {
         }
         prevBtn = findViewById<Button>(R.id.prev).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } } }
         nextBtn = findViewById<Button>(R.id.next).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur + 1) % files.size; loadPreview() } } }
-        findViewById<View>(R.id.compare).setOnTouchListener { view, e ->
+        val compareTouch = View.OnTouchListener { view, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> { hold(true) }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { hold(false); view.performClick() }
             }
             false  // let the button show its pressed state
         }
+        findViewById<View>(R.id.compare).setOnTouchListener(compareTouch)
+        gridCompare.setOnTouchListener(compareTouch)
         singleBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> player?.let { fitSurface(it.videoSize) }; syncOverlay() }
         videoRow = findViewById(R.id.videoRow)
         playBtn = findViewById<MaterialButton>(R.id.play).apply { setOnClickListener { if (player?.playWhenReady == true) pause() else play() } }
@@ -344,9 +359,9 @@ class MainActivity : AppCompatActivity() {
             val s = Slider(this).apply {
                 valueFrom = dmin[i]; valueTo = 100f; stepSize = 1f; value = 0f
                 labelBehavior = LabelFormatter.LABEL_GONE; isTickVisible = false; contentDescription = names[i]
-                addOnChangeListener { _, value, fromUser -> if (fromUser) { v[i] = base[i] + value * scale[i]; showValue(i); userChanged() } }
+                addOnChangeListener { _, value, fromUser -> if (fromUser) { v[i] = base[i] + value * scale[i]; showValue(i); userChanged(i) } }
                 val reset = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-                    override fun onDoubleTap(e: MotionEvent): Boolean { v[i] = base[i]; setSlider(i); userChanged(); return true }
+                    override fun onDoubleTap(e: MotionEvent): Boolean { v[i] = base[i]; setSlider(i); userChanged(i); return true }
                 })
                 setOnTouchListener { _, e -> reset.onTouchEvent(e); false }  // double-tap resets to neutral
             }
@@ -472,6 +487,49 @@ class MainActivity : AppCompatActivity() {
         setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
     }
 
+    private fun showHelp() {
+        val sections = listOf(
+            "What DiveFix does" to "Water swallows red light first, so dive photos and videos turn blue-green. DiveFix brings the colours back with a few simple settings and saves corrected copies. Your originals are never changed, and everything runs offline on your phone.",
+            "All files or individual" to "In the grid, the settings apply to all files. Open a file, or long-press to select several, and changes apply only to those: they become individual (✱) and later grid changes skip them. Reset returns them to the settings for all files.",
+            "Presets" to "Shallow, Medium and Deep are starting points for typical depths. Save your own with + Save preset; long-press a preset to update, rename or delete it.",
+            "Gradient (photos)" to "Fades the correction from full strength at ● to none at ○, for example when the top and bottom of a shot were lit differently.",
+            "Saving" to "Phone saves to DCIM/DiveFix, where your gallery shows it. Card saves to a DiveFix folder on the camera's card. Copies get _fix in the name, and correcting a file again replaces its earlier copy. Capture date and location are kept.",
+            "Camera card" to "Set the camera to USB mode, connect it and add files with +. Don't unplug while saving. Originals and corrected copies on the same card are not a backup: copy them somewhere else too.",
+            "Kept only while the app is open" to "The list of files and all individual settings (✱, gradients) are temporary. Presets and the save location are remembered.",
+            "Videos" to "Playback shows the correction live. Exporting takes a while: keep the screen on and the phone charging. HDR clips are saved as normal (SDR) video.",
+        )
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding((24 * dp).toInt(), (4 * dp).toInt(), (24 * dp).toInt(), 0) }
+        for ((title, body) in sections) {
+            box.addView(TextView(this).apply {
+                text = title; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+                setTextColor(MaterialColors.getColor(box, com.google.android.material.R.attr.colorPrimary)); setPadding(0, (12 * dp).toInt(), 0, (2 * dp).toInt())
+            })
+            box.addView(TextView(this).apply {
+                text = body; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+                setTextColor(MaterialColors.getColor(box, com.google.android.material.R.attr.colorOnSurfaceVariant))
+            })
+        }
+        MaterialAlertDialogBuilder(this).setTitle("Help").setView(ScrollView(this).apply { addView(box) }).setPositiveButton("Close", null).show()
+    }
+
+    private fun showAbout() {
+        val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding((24 * dp).toInt(), (24 * dp).toInt(), (24 * dp).toInt(), (8 * dp).toInt())
+            addView(ImageView(context).apply { setImageResource(R.mipmap.ic_launcher) }, LinearLayout.LayoutParams((72 * dp).toInt(), (72 * dp).toInt()))
+            addView(TextView(context).apply { text = "DiveFix"; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleLarge); setPadding(0, (12 * dp).toInt(), 0, 0) })
+            addView(TextView(context).apply {
+                text = "Version $version"; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+                setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+            })
+            addView(TextView(context).apply {
+                text = "Underwater colour correction for photos and videos.\nRuns fully offline: nothing leaves your phone.\n\nBuilt with AndroidX Media3 and Material Components."
+                gravity = Gravity.CENTER; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium); setPadding(0, (16 * dp).toInt(), 0, 0)
+            })
+        }
+        MaterialAlertDialogBuilder(this).setView(box).setPositiveButton("Close", null).show()
+    }
+
     // Small explanation bubble under a slider label; tap anywhere to close.
     private fun showHint(anchor: View, text: String) {
         val bubble = TextView(this).apply {
@@ -498,7 +556,7 @@ class MainActivity : AppCompatActivity() {
     // Replaces the selection (used for "Clear selection").
     private fun setFiles(list: List<Uri>) {
         if (running) { say("Wait for the current batch to finish first"); return }
-        files = listOf(); edits.clear()
+        files = listOf(); edits.clear(); selected.clear()
         addFiles(list)
     }
 
@@ -523,7 +581,9 @@ class MainActivity : AppCompatActivity() {
         go.isEnabled = files.isNotEmpty() && !running
         emptyBox.visibility = if (files.isEmpty()) View.VISIBLE else View.GONE
         grid.visibility = if (files.isEmpty()) View.GONE else View.VISIBLE
-        addMore.visibility = if (files.isNotEmpty() && !single && !running) View.VISIBLE else View.GONE
+        addMore.visibility = if (files.isNotEmpty() && !single && !running && !selecting) View.VISIBLE else View.GONE
+        gridCompare.visibility = if (files.isNotEmpty() && !single) View.VISIBLE else View.GONE
+        (gridCompare.layoutParams as FrameLayout.LayoutParams).marginEnd = ((if (addMore.visibility == View.VISIBLE) 84 else 16) * dp).toInt()
         updateToolbar()
     }
 
@@ -540,25 +600,37 @@ class MainActivity : AppCompatActivity() {
             toolbar.navigationContentDescription = "Back to grid"
             toolbar.title = fileTitle; toolbar.subtitle = fileSub
             menu.add(0, 3, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        } else if (selecting) {
+            toolbar.setNavigationIcon(R.drawable.ic_close)
+            toolbar.navigationContentDescription = "End selection"
+            toolbar.title = "${selected.size} selected"; toolbar.subtitle = null
+            menu.add(0, 6, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+            if (selected.size < files.size) menu.add(0, 5, 0, "Select all")
         } else {
             toolbar.navigationIcon = null
             toolbar.title = "DiveFix"; toolbar.subtitle = if (files.isEmpty()) null else counts()
             if (files.isNotEmpty()) menu.add(0, 4, 2, "Clear selection")
         }
-        menu.add(0, 2, 1, "Camera card folder…")
-        for (k in 0 until menu.size()) menu.getItem(k).isEnabled = !running || menu.getItem(k).itemId == 2
+        menu.add(0, 2, 3, "Camera card folder…")
+        menu.add(0, 7, 4, "Help")
+        menu.add(0, 8, 5, "About")
+        for (k in 0 until menu.size()) menu.getItem(k).isEnabled = !running || menu.getItem(k).itemId in listOf(2, 7, 8)
     }
 
     private fun showMode() {
         singleBox.visibility = if (single) View.VISIBLE else View.GONE
-        backToGrid.isEnabled = single
+        backToGrid.isEnabled = single || selecting
         updateCount()
     }
 
     // Points the sliders at what they now edit: the shown file's settings in the single view, the all-files settings in the grid.
     private fun selectTarget() {
         val uri = files.getOrNull(cur)
-        v = if (single && uri != null) edits[uri]?.v ?: g.copyOf() else g
+        v = when {
+            single && uri != null -> edits[uri]?.v ?: g.copyOf()
+            selecting -> settingsFor(selected.first()).copyOf()  // the sliders start from the first selected file
+            else -> g
+        }
         for (i in 0 until n) setSlider(i)
         syncChips()
         updateMode()
@@ -571,7 +643,50 @@ class MainActivity : AppCompatActivity() {
         if (!edits.containsKey(uri)) { edits[uri] = Edit(v); updateMode() }
     }
 
+    private fun toggle(uri: Uri) {
+        if (running) return
+        if (!selected.remove(uri)) selected.add(uri)
+        selectionChanged()
+    }
+
+    private fun clearSelection() { selected.clear(); selectionChanged() }
+
+    private fun selectionChanged() {
+        backToGrid.isEnabled = single || selecting
+        selectTarget()
+        updateCount()
+        for (k in 0 until grid.childCount) (grid.getChildAt(k) as? FrameLayout)?.let { c -> (c.tag as? Uri)?.let { bindCell(c, it) } }
+    }
+
+    private fun removeSelected() {
+        if (running) return
+        val n = selected.size
+        files = files.filter { it !in selected }
+        selected.forEach { edits.remove(it) }
+        selected.clear()
+        cur = 0
+        selectionChanged()
+        adapter.notifyDataSetChanged()
+        say("$n removed from the list")
+    }
+
+    // In selection mode a slider or preset change sets those values on every selected file, making each individual.
+    private fun spread(only: Int?) {
+        if (single || !selecting) return
+        for (u in selected) {
+            val e = edits.getOrPut(u) { Edit(g.copyOf()) }
+            if (only != null) e.v[only] = v[only] else v.copyInto(e.v)
+        }
+        updateMode()
+    }
+
     private fun resetIndividual() {
+        if (!single && selecting) {
+            val n = selected.count { edits.remove(it) != null }
+            selectTarget(); render()
+            say("$n file${if (n == 1) "" else "s"} use the settings for all files again")
+            return
+        }
         val uri = files.getOrNull(cur) ?: return
         edits.remove(uri)
         overlay.line = null
@@ -585,8 +700,15 @@ class MainActivity : AppCompatActivity() {
         val uri = files.getOrNull(cur)
         val one = single && uri != null
         val e = if (one) edits[uri] else null
+        val group = !single && selecting
         val bg: Int; val fg: Int; val sub: Int
-        if (one) {
+        if (group) {
+            bg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorPrimaryContainer)
+            fg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorOnPrimaryContainer); sub = fg
+            modeIcon.setImageResource(R.drawable.ic_tune)
+            modeTitle.text = "Only the ${selected.size} selected"
+            modeSub.text = "Each change is set on all selected files and makes them individual (✱)"
+        } else if (one) {
             bg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorPrimaryContainer)
             fg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorOnPrimaryContainer); sub = fg
             modeIcon.setImageResource(R.drawable.ic_tune)
@@ -608,10 +730,11 @@ class MainActivity : AppCompatActivity() {
         modeBar.background = GradientDrawable().apply { setColor(bg); cornerRadius = 12 * dp }
         modeIcon.imageTintList = ColorStateList.valueOf(fg)
         modeTitle.setTextColor(fg); modeSub.setTextColor(sub)
-        modeReset.visibility = if (e != null) View.VISIBLE else View.GONE
+        modeReset.visibility = if (e != null || (group && selected.any { edits.containsKey(it) })) View.VISIBLE else View.GONE
     }
 
     private fun enterSingle() {
+        selected.clear()
         single = true
         showMode()
         loadPreview()
@@ -693,8 +816,9 @@ class MainActivity : AppCompatActivity() {
         vals[i]!!.text = if (d > 0 && dmin[i] < 0) "+$d" else "$d"
     }
 
-    private fun userChanged() {
+    private fun userChanged(i: Int) {
         adopt()
+        spread(i)
         syncChips()  // checks a preset chip only if the settings still match it
         render()
     }
@@ -703,6 +827,7 @@ class MainActivity : AppCompatActivity() {
         val o = presets.optJSONObject(name) ?: return
         adopt()
         for (i in 0 until n) { v[i] = o.optDouble(ids[i], base[i].toDouble()).toFloat(); setSlider(i) }
+        spread(null)
         render()
     }
 
@@ -877,6 +1002,7 @@ class MainActivity : AppCompatActivity() {
         if (overlay.drawing) drawBar.visibility = if (on) View.INVISIBLE else View.VISIBLE
         fullOriginal.visibility = originalTag.visibility
         display()
+        if (!single) for (k in 0 until grid.childCount) (grid.getChildAt(k) as? FrameLayout)?.let { c -> (c.tag as? Uri)?.let { bindCell(c, it) } }
         if (player != null) { ui.removeCallbacks(applyFx); applyFx.run() }
     }
 
@@ -909,6 +1035,15 @@ class MainActivity : AppCompatActivity() {
                 setBackgroundResource(R.drawable.pill); setPadding((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
                 addView(icon(R.drawable.ic_asterisk), FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt()))
             }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.START).apply { setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, 0) })
+            val primary = MaterialColors.getColor(this@MainActivity, com.google.android.material.R.attr.colorPrimary, Color.CYAN)
+            addView(FrameLayout(context).apply {  // selected: tinted with a frame and a check
+                background = GradientDrawable().apply { setColor((primary and 0x00FFFFFF) or 0x40000000); setStroke((3 * dp).toInt(), primary) }
+                addView(ImageView(context).apply {
+                    setImageResource(R.drawable.ic_check); setPadding((3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt())
+                    imageTintList = ColorStateList.valueOf(MaterialColors.getColor(this@MainActivity, com.google.android.material.R.attr.colorOnPrimary, Color.BLACK))
+                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(primary) }
+                }, FrameLayout.LayoutParams((22 * dp).toInt(), (22 * dp).toInt(), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, (6 * dp).toInt(), (6 * dp).toInt()) })
+            }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
     }
 
@@ -919,6 +1054,7 @@ class MainActivity : AppCompatActivity() {
         val where = cell.getChildAt(1) as LinearLayout
         val vid = cell.getChildAt(2) as LinearLayout
         cell.getChildAt(3).visibility = if (edits.containsKey(uri)) View.VISIBLE else View.GONE
+        cell.getChildAt(4).visibility = if (uri in selected) View.VISIBLE else View.GONE
         val t = thumbs.get(uri)
         if (t == null) {
             img.setImageBitmap(null); where.visibility = View.GONE; vid.visibility = View.GONE
@@ -931,7 +1067,7 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-        img.setImageBitmap(t.out)
+        img.setImageBitmap(if (holding) t.original() else t.out)
         val card = cardFiles.containsKey(t.outName)
         where.visibility = if (t.phone || card) View.VISIBLE else View.GONE
         where.getChildAt(0).visibility = if (t.phone) View.VISIBLE else View.GONE
@@ -973,7 +1109,7 @@ class MainActivity : AppCompatActivity() {
                 val t = thumbs.get(uri) ?: continue
                 if (t.key == key || t.w == 0) continue
                 val bmp = Bitmap.createBitmap(correct(t.px, t.w, t.h, s, line), t.w, t.h, Bitmap.Config.ARGB_8888)
-                runOnUiThread { if (seq == renderSeq) { t.out = bmp; t.key = key; (cellFor(uri)?.getChildAt(0) as? ImageView)?.setImageBitmap(bmp) } }
+                runOnUiThread { if (seq == renderSeq) { t.out = bmp; t.key = key; if (!holding) (cellFor(uri)?.getChildAt(0) as? ImageView)?.setImageBitmap(bmp) } }
             }
         }
     }
