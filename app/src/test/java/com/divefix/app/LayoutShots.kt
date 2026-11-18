@@ -97,15 +97,17 @@ class LayoutShots {
                 drawing = true; line = floatArrayOf(.25f, .75f, .62f, .3f)
             }
             root.findViewById<View>(R.id.drawBar).visibility = View.VISIBLE
-            root.findViewById<TextView>(R.id.drawHint).text = "Full effect at ●, none at ○"
-            root.findViewById<com.google.android.material.button.MaterialButton>(R.id.gradientBtn).apply {
-                isChecked = true; backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF6CCFDD.toInt()); iconTint = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
-            }
+            root.findViewById<TextView>(R.id.drawHint).text = "Drag again to redraw · ● full effect, ○ none"
+            val on = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
+            root.findViewById<View>(R.id.gradientGroup).background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF6CCFDD.toInt()); cornerRadius = 24 * dp }
+            root.findViewById<com.google.android.material.button.MaterialButton>(R.id.gradientBtn).apply { backgroundTintList = android.content.res.ColorStateList.valueOf(0); iconTint = on }
+            listOf(R.id.gradientSave, R.id.gradientDiscard).forEach { root.findViewById<com.google.android.material.button.MaterialButton>(it).apply { visibility = View.VISIBLE; iconTint = on } }
             root.findViewById<View>(R.id.videoRow).visibility = View.GONE
+            root.findViewById<View>(R.id.histo).visibility = View.GONE
             root.findViewById<Histo>(R.id.histo).data = Array(3) { ch -> IntArray(64) { i -> (1000 * Math.exp(-Math.pow((i - 20.0 - ch * 8) / 9.0, 2.0))).toInt() + 20 } }
         }
         val chips = root.findViewById<ChipGroup>(R.id.presets)
-        listOf("Shallow 0-5 m", "Medium 5-15 m", "Deep 15 m+").forEachIndexed { k, n ->
+        listOf("Shallow", "Medium", "Deep").forEachIndexed { k, n ->
             val chip = android.view.LayoutInflater.from(ctx).inflate(R.layout.chip_preset, chips, false) as Chip
             chip.text = n; chip.id = View.generateViewId(); chips.addView(chip); if (k == 1) chip.isChecked = true
         }
@@ -116,9 +118,12 @@ class LayoutShots {
         val dots = intArrayOf(0xFFE5604D.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0, 0, 0, 0)
         for (i in names.indices) {
             val row = LinearLayout(ctx).apply { gravity = Gravity.CENTER_VERTICAL }
-            row.addView(View(ctx).apply { background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(dots[i]) }; visibility = if (dots[i] != 0) View.VISIBLE else View.INVISIBLE },
-                LinearLayout.LayoutParams((8 * dp).toInt(), (8 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
-            row.addView(TextView(ctx).apply { text = names[i]; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium) }, LinearLayout.LayoutParams((92 * dp).toInt(), -2))
+            val icons = intArrayOf(0, 0, 0, R.drawable.ic_brightness, R.drawable.ic_contrast, R.drawable.ic_saturation, R.drawable.ic_vibrance)
+            row.addView(FrameLayout(ctx).apply {
+                if (dots[i] != 0) addView(View(ctx).apply { background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(dots[i]) } }, FrameLayout.LayoutParams((8 * dp).toInt(), (8 * dp).toInt(), Gravity.CENTER))
+                else addView(ImageView(ctx).apply { setImageResource(icons[i]); imageTintList = android.content.res.ColorStateList.valueOf(0xFFA8B0B2.toInt()) }, FrameLayout.LayoutParams((16 * dp).toInt(), (16 * dp).toInt(), Gravity.CENTER))
+            }, LinearLayout.LayoutParams((16 * dp).toInt(), (16 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+            row.addView(TextView(ctx).apply { text = names[i]; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium) }, LinearLayout.LayoutParams((88 * dp).toInt(), -2))
             row.addView(Slider(ctx).apply { valueFrom = if (i == 0 || i == 6) 0f else -100f; valueTo = 100f; stepSize = 1f; value = values[i]; labelBehavior = LabelFormatter.LABEL_GONE; isTickVisible = false }, LinearLayout.LayoutParams(0, -2, 1f))
             row.addView(TextView(ctx).apply { text = values[i].toInt().let { if (it > 0 && i in 1..5) "+$it" else "$it" }; gravity = Gravity.END; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall); setTextColor(0xFFA8B0B2.toInt()) }, LinearLayout.LayoutParams((36 * dp).toInt(), -2))
             box.addView(row)

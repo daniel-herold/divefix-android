@@ -30,12 +30,9 @@
         <com.divefix.app.LineOverlay android:id="@+id/lineOverlay" android:layout_width="match_parent" android:layout_height="match_parent" />
         <LinearLayout android:id="@+id/drawBar" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_gravity="top|center_horizontal" android:layout_marginTop="12dp" android:background="@drawable/pill"
-            android:gravity="center_vertical" android:paddingStart="14dp" android:paddingEnd="4dp" android:visibility="gone">
+            android:gravity="center_vertical" android:paddingHorizontal="14dp" android:visibility="gone">
             <TextView android:id="@+id/drawHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:paddingVertical="8dp" android:textColor="@android:color/white" android:textAppearance="?attr/textAppearanceLabelLarge" />
-            <com.google.android.material.button.MaterialButton android:id="@+id/drawRemove" style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="36dp" android:text="Remove"
-                android:textColor="?attr/colorPrimary" />
         </LinearLayout>
         <TextView android:id="@+id/originalTag" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_gravity="top|center_horizontal" android:layout_marginTop="12dp" android:background="@drawable/pill"
@@ -53,9 +50,18 @@
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom">
                 <com.google.android.material.button.MaterialButton android:id="@+id/compare" style="@style/Widget.Material3.Button.TonalButton.Icon" android:layout_width="wrap_content"
                     android:layout_height="wrap_content" android:text="Hold to compare" app:icon="@drawable/ic_compare" />
-                <com.google.android.material.button.MaterialButton android:id="@+id/gradientBtn" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal"
-                    android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="4dp"
-                    android:checkable="true" android:contentDescription="Draw a gradient" app:icon="@drawable/ic_gradient" />
+                <LinearLayout android:id="@+id/gradientGroup" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp" android:gravity="center_vertical">
+                    <com.google.android.material.button.MaterialButton android:id="@+id/gradientBtn" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:contentDescription="Draw a gradient" app:icon="@drawable/ic_gradient" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/gradientSave" style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone"
+                        android:contentDescription="Keep gradient" app:icon="@drawable/ic_check" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/gradientDiscard" style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginEnd="2dp" android:visibility="gone"
+                        android:contentDescription="Discard gradient" app:icon="@drawable/ic_close" />
+                </LinearLayout>
                 <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
                 <com.divefix.app.Histo android:id="@+id/histo" android:layout_width="@dimen/histo_w" android:layout_height="@dimen/histo_h"
                     android:layout_marginBottom="6dp" />

@@ -83,6 +83,10 @@ import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
+import android.graphics.drawable.ColorDrawable
+import android.transition.AutoTransition
+import android.transition.TransitionManager
+import android.widget.PopupWindow
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -95,7 +99,15 @@ class MainActivity : AppCompatActivity() {
     private val scale = floatArrayOf(1f, .3f, .4f, .002f, .004f, .01f, 1f)
     private val dmin = floatArrayOf(0f, -100f, -100f, -100f, -100f, -100f, 0f)
     private val dots = intArrayOf(0xFFE5604D.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0, 0, 0, 0)
-    private val defaults = """{"Shallow 0-5 m":{"red":30,"green":0,"blue":-10,"bright":0,"contrast":1.05,"sat":1.05,"pop":20},"Medium 5-15 m":{"red":60,"green":-8,"blue":-20,"bright":0.02,"contrast":1.1,"sat":1.1,"pop":30},"Deep 15 m+":{"red":100,"green":-15,"blue":-30,"bright":0.04,"contrast":1.15,"sat":1.15,"pop":40}}"""
+    // Shallow ~0-5 m, Medium ~5-15 m, Deep ~15 m+. Red is absorbed first, so it needs the most help, then blue and green are
+    // pulled back; deeper water is darker and hazier, so brightness, contrast and colour get a little more too.
+    private val defaults = """{"Shallow":{"red":45,"green":-3,"blue":-8,"bright":0,"contrast":1.08,"sat":1.05,"pop":15},"Medium":{"red":80,"green":-6,"blue":-12,"bright":0.02,"contrast":1.12,"sat":1.1,"pop":25},"Deep":{"red":100,"green":-9,"blue":-20,"bright":0.04,"contrast":1.16,"sat":1.15,"pop":35}}"""
+    private val icons = intArrayOf(0, 0, 0, R.drawable.ic_brightness, R.drawable.ic_contrast, R.drawable.ic_saturation, R.drawable.ic_vibrance)
+    private val hints = arrayOf<String?>(null, null, null,
+        "Lightens or darkens the whole picture evenly. Deeper dives are darker, so raise it a little there.",
+        "Pushes darks and lights apart. Water haze makes dive shots look flat; more contrast gives them depth.",
+        "Makes every colour stronger or weaker by the same amount. Use it sparingly, too much looks artificial.",
+        "Strengthens muted colours a lot and already-strong ones barely, so blues and corals come alive without neon fish.")
     @Suppress("DEPRECATION")
     private val exifTags = arrayOf(
         ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED, ExifInterface.TAG_DATETIME,
@@ -178,7 +190,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gradientBtn: MaterialButton
     private lateinit var drawBar: View
     private lateinit var drawHint: TextView
-    private lateinit var drawRemove: View
+    private lateinit var gradientGroup: LinearLayout
+    private lateinit var gradientSave: View
+    private lateinit var gradientDiscard: View
+    private var drawMode = false
     private lateinit var addMore: View
     private lateinit var emptyBox: View
     private lateinit var modeBar: LinearLayout
@@ -274,10 +289,12 @@ class MainActivity : AppCompatActivity() {
         }
         drawBar = findViewById(R.id.drawBar)
         drawHint = findViewById(R.id.drawHint)
-        drawRemove = findViewById<View>(R.id.drawRemove).apply {
-            setOnClickListener { edits[files[cur]]?.line = null; this@MainActivity.overlay.line = null; render(); updateMode(); updateDrawBar() }
+        gradientGroup = findViewById(R.id.gradientGroup)
+        gradientBtn = findViewById<MaterialButton>(R.id.gradientBtn).apply { setOnClickListener { setDrawMode(!drawMode) } }  // tapping again keeps the line
+        gradientSave = findViewById<View>(R.id.gradientSave).apply { setOnClickListener { setDrawMode(false) } }
+        gradientDiscard = findViewById<View>(R.id.gradientDiscard).apply {
+            setOnClickListener { edits[files[cur]]?.line = null; render(); updateMode(); setDrawMode(false) }
         }
-        gradientBtn = findViewById<MaterialButton>(R.id.gradientBtn).apply { addOnCheckedChangeListener { _, on -> setDrawMode(on) } }
         prevBtn = findViewById<Button>(R.id.prev).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } } }
         nextBtn = findViewById<Button>(R.id.next).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur + 1) % files.size; loadPreview() } } }
         findViewById<View>(R.id.compare).setOnTouchListener { view, e ->
@@ -308,13 +325,22 @@ class MainActivity : AppCompatActivity() {
         val muted = MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant, Color.GRAY)
         for (i in 0 until n) {
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-            row.addView(View(this).apply {
-                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dots[i]) }
-                visibility = if (dots[i] != 0) View.VISIBLE else View.INVISIBLE
-            }, LinearLayout.LayoutParams((8 * dp).toInt(), (8 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
-            row.addView(TextView(this).apply {
-                text = names[i]; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
-            }, LinearLayout.LayoutParams((92 * dp).toInt(), WRAP_CONTENT))
+            val label = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(FrameLayout(context).apply {
+                    if (dots[i] != 0) addView(View(context).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dots[i]) } },
+                        FrameLayout.LayoutParams((8 * dp).toInt(), (8 * dp).toInt(), Gravity.CENTER))
+                    else addView(ImageView(context).apply { setImageResource(icons[i]); imageTintList = ColorStateList.valueOf(muted) },
+                        FrameLayout.LayoutParams((16 * dp).toInt(), (16 * dp).toInt(), Gravity.CENTER))
+                }, LinearLayout.LayoutParams((16 * dp).toInt(), (16 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+                addView(TextView(context).apply { text = names[i]; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium) })
+                hints[i]?.let { hint ->
+                    background = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).run { val d = getDrawable(0); recycle(); d }
+                    contentDescription = "${names[i]}. $hint"
+                    setOnClickListener { showHint(this, hint) }
+                }
+            }
+            row.addView(label, LinearLayout.LayoutParams((112 * dp).toInt(), (40 * dp).toInt()))
             val s = Slider(this).apply {
                 valueFrom = dmin[i]; valueTo = 100f; stepSize = 1f; value = 0f
                 labelBehavior = LabelFormatter.LABEL_GONE; isTickVisible = false; contentDescription = names[i]
@@ -344,6 +370,13 @@ class MainActivity : AppCompatActivity() {
 
         // ---------- presets ----------
         presets = JSONObject(prefs.getString("presets", null) ?: defaults)
+        if (prefs.getInt("presetsVersion", 1) < 2) {  // replace the first-generation default presets, keep the user's own
+            val old = setOf("Shallow 0-5 m", "Medium 5-15 m", "Deep 15 m+")
+            val merged = JSONObject(defaults)
+            presets.keys().asSequence().toList().filter { it !in old && !merged.has(it) }.forEach { merged.put(it, presets.get(it)) }
+            presets = merged
+            prefs.edit().putString("presets", presets.toString()).putInt("presetsVersion", 2).apply()
+        }
         chips = findViewById(R.id.presets)
         chips.setOnCheckedStateChangeListener { g, checked ->
             if (applyingPreset || checked.isEmpty()) return@setOnCheckedStateChangeListener
@@ -437,6 +470,20 @@ class MainActivity : AppCompatActivity() {
         text = t; setTextColor(Color.WHITE); setBackgroundResource(R.drawable.pill)
         setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge); setTextColor(Color.WHITE)
         setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+    }
+
+    // Small explanation bubble under a slider label; tap anywhere to close.
+    private fun showHint(anchor: View, text: String) {
+        val bubble = TextView(this).apply {
+            this.text = text; maxWidth = (280 * dp).toInt()
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+            setTextColor(MaterialColors.getColor(anchor, com.google.android.material.R.attr.colorOnSurface))
+            setPadding((14 * dp).toInt(), (10 * dp).toInt(), (14 * dp).toInt(), (10 * dp).toInt())
+            background = GradientDrawable().apply { setColor(MaterialColors.getColor(anchor, com.google.android.material.R.attr.colorSurfaceContainerHighest)); cornerRadius = 12 * dp }
+        }
+        val pop = PopupWindow(bubble, WRAP_CONTENT, WRAP_CONTENT, true).apply { elevation = 6 * dp; isOutsideTouchable = true; setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)) }
+        pop.showAsDropDown(anchor, 0, (2 * dp).toInt())
+        ui.postDelayed({ if (pop.isShowing) pop.dismiss() }, 6000)
     }
 
     private fun say(msg: String, action: String? = null, fn: (() -> Unit)? = null) {
@@ -571,22 +618,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setDrawMode(on: Boolean) {
-        if (gradientBtn.isChecked != on) { gradientBtn.isChecked = on; return }  // the button's listener calls back here
+        drawMode = on
         overlay.drawing = on
         overlay.line = edits[files.getOrNull(cur)]?.line
-        // Make "drawing" unmistakable: the tool fills with the accent colour while it is on.
-        gradientBtn.backgroundTintList = ColorStateList.valueOf(MaterialColors.getColor(gradientBtn,
-            if (on) com.google.android.material.R.attr.colorPrimary else com.google.android.material.R.attr.colorSecondaryContainer))
-        gradientBtn.iconTint = ColorStateList.valueOf(MaterialColors.getColor(gradientBtn,
-            if (on) com.google.android.material.R.attr.colorOnPrimary else com.google.android.material.R.attr.colorOnSecondaryContainer))
         drawBar.visibility = if (on) View.VISIBLE else View.GONE
+        histo.visibility = if (on || player?.playWhenReady == true) View.GONE else View.VISIBLE  // room for the expanded tool
         updateDrawBar()
     }
 
+    // Off: plain tool button. Drawing: the tool fills with the accent colour. Once a line exists it expands to [tool | ✓ keep | ✕ discard].
     private fun updateDrawBar() {
         val has = edits[files.getOrNull(cur)]?.line != null
-        drawHint.text = if (has) "Full effect at ●, none at ○" else "Drag across the photo"
-        drawRemove.visibility = if (has) View.VISIBLE else View.GONE
+        val expanded = drawMode && has
+        drawHint.text = if (has) "Drag again to redraw · ● full effect, ○ none" else "Drag across the photo"
+        val color = { attr: Int -> MaterialColors.getColor(gradientBtn, attr) }
+        val primary = color(com.google.android.material.R.attr.colorPrimary)
+        val onPrimary = color(com.google.android.material.R.attr.colorOnPrimary)
+        TransitionManager.beginDelayedTransition(gradientGroup, AutoTransition().setDuration(150))
+        gradientSave.visibility = if (expanded) View.VISIBLE else View.GONE
+        gradientDiscard.visibility = gradientSave.visibility
+        gradientGroup.background = if (expanded) GradientDrawable().apply { setColor(primary); cornerRadius = 24 * dp } else null
+        gradientBtn.backgroundTintList = ColorStateList.valueOf(when {
+            expanded -> Color.TRANSPARENT
+            drawMode -> primary
+            else -> color(com.google.android.material.R.attr.colorSecondaryContainer)
+        })
+        gradientBtn.iconTint = ColorStateList.valueOf(if (drawMode) onPrimary else color(com.google.android.material.R.attr.colorOnSecondaryContainer))
+        (gradientSave as MaterialButton).iconTint = ColorStateList.valueOf(onPrimary)
+        (gradientDiscard as MaterialButton).iconTint = ColorStateList.valueOf(onPrimary)
     }
 
     // Keeps the overlay's idea of where the photo sits in sync with the image view (fit-center).
@@ -792,7 +851,14 @@ class MainActivity : AppCompatActivity() {
             val out = correct(px, src.width, src.height, s, line)
             val bmp = Bitmap.createBitmap(out, src.width, src.height, Bitmap.Config.ARGB_8888)
             val h = hist(out)
-            runOnUiThread { if (seq == renderSeq) { outBmp = bmp; outHist = h; display() } }
+            runOnUiThread {
+                if (seq != renderSeq) return@runOnUiThread
+                outBmp = bmp; outHist = h; display()
+                if (player?.playWhenReady != true) {
+                    image.visibility = View.VISIBLE; histo.visibility = if (drawMode) View.GONE else View.VISIBLE
+                    if (player != null) releasePlayer()  // the corrected still now covers the paused video, so the player can go
+                }
+            }
         }
     }
 
@@ -979,7 +1045,6 @@ class MainActivity : AppCompatActivity() {
             if (bmp == null) { say("Can't open ${fileTitle}"); return@runOnUiThread }
             srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
             syncOverlay()
-            if (player?.playWhenReady != true) { image.visibility = View.VISIBLE; histo.visibility = View.VISIBLE }
             if (full.isShowing) orientFull()
             render()
         }
@@ -992,9 +1057,10 @@ class MainActivity : AppCompatActivity() {
     private fun play() {
         if (running) { say("Playback is paused while files are being corrected"); return }
         if (videoDur > 0 && videoPos >= videoDur - 200) videoPos = 0
-        var p = player
-        if (p == null) {
-            p = ExoPlayer.Builder(this).build()
+        // Always start a fresh player at the current position: resuming a paused one with live colour effects can stall.
+        if (player != null) releasePlayer()
+        run {
+            val p = ExoPlayer.Builder(this).build()
             player = p
             p.setVideoSurfaceView(surface)
             p.setVideoEffects(listOf<Effect>(lut(matrix(), v[6] / 100f)))
@@ -1008,14 +1074,13 @@ class MainActivity : AppCompatActivity() {
                 override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) pause() }
                 override fun onPlayerError(error: PlaybackException) { say("Can't play this video (${error.errorCodeName})"); releasePlayer(); loadFrame(true) }
             })
-            p.setMediaItem(MediaItem.fromUri(files[cur]))
+            p.setMediaItem(MediaItem.fromUri(files[cur]), videoPos)
             p.prepare()
             if (holding) applyFx.run()
-        } else image.visibility = View.INVISIBLE
+            p.play()
+        }
         surface.visibility = View.VISIBLE
         histo.visibility = View.GONE
-        p.seekTo(videoPos)
-        p.play()
         ui.removeCallbacks(ticker); ui.post(ticker)
     }
 
