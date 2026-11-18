@@ -38,8 +38,8 @@ class LayoutShots {
     private fun fill(root: View, singleView: Boolean, columns: Int = 3) {
         val ctx = root.context; val dp = ctx.resources.displayMetrics.density
         root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
-            if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.MP4"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
-            else { title = "DiveFix"; subtitle = "12 selected"; menu.add("Add").setIcon(R.drawable.ic_add).setShowAsAction(2) }
+            if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.JPG"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
+            else { title = "DiveFix"; subtitle = "18 photos · 4 videos" }
             menu.add("Camera card folder…")
         }
         val grid = root.findViewById<GridView>(R.id.grid)
@@ -57,6 +57,10 @@ class LayoutShots {
                     addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_phone); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
                     if (p % 2 == 0) addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_sd); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
                 }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
+                if (p == 2 || p == 7) addView(FrameLayout(ctx).apply {
+                    setBackgroundResource(R.drawable.pill); setPadding((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
+                    addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_asterisk) }, FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt()))
+                }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, 0) })
                 if (p == 1 || p == 5) addView(LinearLayout(ctx).apply {
                     gravity = Gravity.CENTER_VERTICAL; setBackgroundResource(R.drawable.scrim_bottom); setPadding((6 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
                     addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_play); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
@@ -65,12 +69,39 @@ class LayoutShots {
             }
         }
         root.findViewById<View>(R.id.empty).visibility = View.GONE
+        root.findViewById<View>(R.id.grid).visibility = View.VISIBLE
+        val bar = root.findViewById<LinearLayout>(R.id.modeBar)
+        val title = root.findViewById<TextView>(R.id.modeTitle); val sub = root.findViewById<TextView>(R.id.modeSub)
+        val icon = root.findViewById<ImageView>(R.id.modeIcon)
+        if (singleView) {
+            bar.background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF004F58.toInt()); cornerRadius = 12 * dp }
+            icon.setImageResource(R.drawable.ic_tune); icon.imageTintList = android.content.res.ColorStateList.valueOf(0xFFA2EEFF.toInt())
+            title.text = "Only this photo"; sub.text = "Individual settings with a gradient"
+            title.setTextColor(0xFFA2EEFF.toInt()); sub.setTextColor(0xFFA2EEFF.toInt())
+            root.findViewById<View>(R.id.modeReset).visibility = View.VISIBLE
+        } else {
+            bar.background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF272A2B.toInt()); cornerRadius = 12 * dp }
+            icon.setImageResource(R.drawable.ic_photos); icon.imageTintList = android.content.res.ColorStateList.valueOf(0xFFE1E3E3.toInt())
+            title.text = "All files"; sub.text = "Changes apply to all except 2 individually edited (✱)"
+            title.setTextColor(0xFFE1E3E3.toInt()); sub.setTextColor(0xFFA8B0B2.toInt())
+            root.findViewById<View>(R.id.addMore).visibility = View.VISIBLE
+        }
         if (singleView) {
             root.findViewById<View>(R.id.single).visibility = View.VISIBLE
             root.findViewById<ImageView>(R.id.image).setImageBitmap(fake(1280, 720, 3))
             root.findViewById<View>(R.id.videoRow).visibility = View.VISIBLE
             root.findViewById<TextView>(R.id.time).text = "0:12 / 0:42"
             root.findViewById<Slider>(R.id.timeline).apply { valueTo = 42f; value = 12f }
+            root.findViewById<LineOverlay>(R.id.lineOverlay).apply {
+                imgRect.set(0f, (393 * dp - 393 * dp * 720 / 1280) / 2, 393 * dp, (393 * dp + 393 * dp * 720 / 1280) / 2)
+                drawing = true; line = floatArrayOf(.25f, .75f, .62f, .3f)
+            }
+            root.findViewById<View>(R.id.drawBar).visibility = View.VISIBLE
+            root.findViewById<TextView>(R.id.drawHint).text = "Full effect at ●, none at ○"
+            root.findViewById<com.google.android.material.button.MaterialButton>(R.id.gradientBtn).apply {
+                isChecked = true; backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF6CCFDD.toInt()); iconTint = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
+            }
+            root.findViewById<View>(R.id.videoRow).visibility = View.GONE
             root.findViewById<Histo>(R.id.histo).data = Array(3) { ch -> IntArray(64) { i -> (1000 * Math.exp(-Math.pow((i - 20.0 - ch * 8) / 9.0, 2.0))).toInt() + 20 } }
         }
         val chips = root.findViewById<ChipGroup>(R.id.presets)

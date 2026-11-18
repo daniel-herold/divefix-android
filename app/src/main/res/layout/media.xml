@@ -4,7 +4,8 @@
     android:background="?attr/colorSurfaceContainerLowest">
 
     <GridView android:id="@+id/grid" android:layout_width="match_parent" android:layout_height="match_parent"
-        android:horizontalSpacing="2dp" android:verticalSpacing="2dp" android:stretchMode="columnWidth" />
+        android:horizontalSpacing="2dp" android:verticalSpacing="2dp" android:stretchMode="columnWidth"
+        android:clipToPadding="false" android:paddingBottom="88dp" android:visibility="gone" />
 
     <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="match_parent"
         android:orientation="vertical" android:gravity="center" android:padding="32dp">
@@ -26,6 +27,16 @@
             android:layout_gravity="center" android:visibility="gone" />
         <ImageView android:id="@+id/image" android:layout_width="match_parent" android:layout_height="match_parent"
             android:scaleType="fitCenter" android:contentDescription="Preview. Tap for full screen." />
+        <com.divefix.app.LineOverlay android:id="@+id/lineOverlay" android:layout_width="match_parent" android:layout_height="match_parent" />
+        <LinearLayout android:id="@+id/drawBar" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal" android:layout_marginTop="12dp" android:background="@drawable/pill"
+            android:gravity="center_vertical" android:paddingStart="14dp" android:paddingEnd="4dp" android:visibility="gone">
+            <TextView android:id="@+id/drawHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:paddingVertical="8dp" android:textColor="@android:color/white" android:textAppearance="?attr/textAppearanceLabelLarge" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/drawRemove" style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content" android:layout_height="wrap_content" android:minHeight="36dp" android:text="Remove"
+                android:textColor="?attr/colorPrimary" />
+        </LinearLayout>
         <TextView android:id="@+id/originalTag" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_gravity="top|center_horizontal" android:layout_marginTop="12dp" android:background="@drawable/pill"
             android:paddingHorizontal="12dp" android:paddingVertical="4dp" android:text="Original" android:textColor="@android:color/white"
@@ -42,6 +53,9 @@
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom">
                 <com.google.android.material.button.MaterialButton android:id="@+id/compare" style="@style/Widget.Material3.Button.TonalButton.Icon" android:layout_width="wrap_content"
                     android:layout_height="wrap_content" android:text="Hold to compare" app:icon="@drawable/ic_compare" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/gradientBtn" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="4dp"
+                    android:checkable="true" android:contentDescription="Draw a gradient" app:icon="@drawable/ic_gradient" />
                 <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
                 <com.divefix.app.Histo android:id="@+id/histo" android:layout_width="@dimen/histo_w" android:layout_height="@dimen/histo_h"
                     android:layout_marginBottom="6dp" />
@@ -60,4 +74,7 @@
             </LinearLayout>
         </LinearLayout>
     </FrameLayout>
+    <com.google.android.material.floatingactionbutton.FloatingActionButton android:id="@+id/addMore" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:layout_gravity="bottom|end" android:layout_margin="16dp"
+        android:contentDescription="Add more photos and videos" android:visibility="gone" app:srcCompat="@drawable/ic_add" />
 </FrameLayout>

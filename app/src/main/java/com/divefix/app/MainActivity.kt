@@ -83,6 +83,7 @@ import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
@@ -107,10 +108,16 @@ class MainActivity : AppCompatActivity() {
     )
 
     /** Grid thumbnail: source pixels plus the last corrected rendering (ver = settings version it was rendered with). */
-    class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, val outName: String, var phone: Boolean, var out: Bitmap?, var ver: Int)
+    class Thumb(val px: IntArray, val w: Int, val h: Int, val dur: Long, val outName: String, var phone: Boolean, var out: Bitmap?, var key: Int)
+
+    /** Individual settings for one file: slider values plus an optional gradient line (x0, y0, x1, y1 in 0..1 image coordinates). */
+    class Edit(val v: FloatArray, var line: FloatArray? = null)
 
     private val n = ids.size
-    private val v = base.copyOf()
+    private val g = base.copyOf()  // settings for all files
+    private var v = g  // what the sliders edit: g in the grid, the shown file's own settings in the single view
+    private val edits = HashMap<Uri, Edit>()  // individually edited files
+    private val videoOf = HashMap<Uri, Boolean>()
     private val sliders = arrayOfNulls<Slider>(n)
     private val vals = arrayOfNulls<TextView>(n)
     private val dp by lazy { resources.displayMetrics.density }
@@ -167,6 +174,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prevBtn: Button
     private lateinit var nextBtn: Button
     private lateinit var histo: Histo
+    private lateinit var overlay: LineOverlay
+    private lateinit var gradientBtn: MaterialButton
+    private lateinit var drawBar: View
+    private lateinit var drawHint: TextView
+    private lateinit var drawRemove: View
+    private lateinit var addMore: View
+    private lateinit var emptyBox: View
+    private lateinit var modeBar: LinearLayout
+    private lateinit var modeIcon: ImageView
+    private lateinit var modeTitle: TextView
+    private lateinit var modeSub: TextView
+    private lateinit var modeReset: View
     private lateinit var videoRow: View
     private lateinit var playBtn: MaterialButton
     private lateinit var timeline: Slider
@@ -188,7 +207,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fullOriginal: TextView
     private val destIds = intArrayOf(R.id.destPhone, R.id.destCard, R.id.destBoth)
 
-    private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) setFiles(it) }
+    private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) addFiles(it) }
     private val cardPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { onCardChosen(it) }
     private val backToGrid = object : OnBackPressedCallback(false) { override fun handleOnBackPressed() = exitSingle() }
     private val applyFx = Runnable { player?.setVideoEffects(if (holding) listOf() else listOf<Effect>(lut(matrix(), v[6] / 100f))) }
@@ -214,7 +233,6 @@ class MainActivity : AppCompatActivity() {
         toolbar = findViewById(R.id.toolbar)
         toolbar.setOnMenuItemClickListener { item ->
             when (item.itemId) {
-                1 -> filePicker.launch(arrayOf("image/*", "video/*"))
                 2 -> chooseCard()
                 3 -> removeCurrent()
                 4 -> setFiles(listOf())
@@ -223,6 +241,8 @@ class MainActivity : AppCompatActivity() {
         }
         toolbar.setNavigationOnClickListener { exitSingle() }
         findViewById<View>(R.id.emptyAdd).setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) }
+        emptyBox = findViewById(R.id.empty)
+        addMore = findViewById<View>(R.id.addMore).apply { setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) } }
 
         // ---------- grid ----------
         adapter = object : BaseAdapter() {
@@ -240,7 +260,6 @@ class MainActivity : AppCompatActivity() {
             if (tablet) { numColumns = GridView.AUTO_FIT; columnWidth = (150 * dp).toInt() } else numColumns = 3
             selector = GradientDrawable()  // no legacy highlight; cells have their own ripple
             adapter = this@MainActivity.adapter
-            emptyView = findViewById(R.id.empty)
             setOnItemClickListener { _, _, pos, _ -> cur = pos; enterSingle() }
         }
 
@@ -250,6 +269,15 @@ class MainActivity : AppCompatActivity() {
         image = findViewById<ImageView>(R.id.image).apply { setOnClickListener { openFull() } }
         originalTag = findViewById(R.id.originalTag)
         histo = findViewById(R.id.histo)
+        overlay = findViewById<LineOverlay>(R.id.lineOverlay).apply {
+            onLine = { l -> adopt(); edits[files[cur]]?.line = l; render(); updateMode(); updateDrawBar() }
+        }
+        drawBar = findViewById(R.id.drawBar)
+        drawHint = findViewById(R.id.drawHint)
+        drawRemove = findViewById<View>(R.id.drawRemove).apply {
+            setOnClickListener { edits[files[cur]]?.line = null; this@MainActivity.overlay.line = null; render(); updateMode(); updateDrawBar() }
+        }
+        gradientBtn = findViewById<MaterialButton>(R.id.gradientBtn).apply { addOnCheckedChangeListener { _, on -> setDrawMode(on) } }
         prevBtn = findViewById<Button>(R.id.prev).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } } }
         nextBtn = findViewById<Button>(R.id.next).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur + 1) % files.size; loadPreview() } } }
         findViewById<View>(R.id.compare).setOnTouchListener { view, e ->
@@ -259,7 +287,7 @@ class MainActivity : AppCompatActivity() {
             }
             false  // let the button show its pressed state
         }
-        singleBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> player?.let { fitSurface(it.videoSize) } }
+        singleBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> player?.let { fitSurface(it.videoSize) }; syncOverlay() }
         videoRow = findViewById(R.id.videoRow)
         playBtn = findViewById<MaterialButton>(R.id.play).apply { setOnClickListener { if (player?.playWhenReady == true) pause() else play() } }
         timeTv = findViewById(R.id.time)
@@ -306,6 +334,13 @@ class MainActivity : AppCompatActivity() {
             box.addView(row)
             setSlider(i)
         }
+
+        // ---------- which files the sliders change ----------
+        modeBar = findViewById(R.id.modeBar)
+        modeIcon = findViewById(R.id.modeIcon)
+        modeTitle = findViewById(R.id.modeTitle)
+        modeSub = findViewById(R.id.modeSub)
+        modeReset = findViewById<View>(R.id.modeReset).apply { setOnClickListener { resetIndividual() } }
 
         // ---------- presets ----------
         presets = JSONObject(prefs.getString("presets", null) ?: defaults)
@@ -360,6 +395,7 @@ class MainActivity : AppCompatActivity() {
         full = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply { setContentView(fullRoot); setOnDismissListener { hold(false) } }
 
         showMode()
+        updateMode()
         takeShared(intent)
     }
 
@@ -376,7 +412,7 @@ class MainActivity : AppCompatActivity() {
             Intent.ACTION_SEND_MULTIPLE -> i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.toList() ?: listOf()
             else -> return
         }
-        if (list.isNotEmpty()) setFiles(list)
+        if (list.isNotEmpty()) addFiles(list)
     }
 
     override fun onResume() {
@@ -412,20 +448,41 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- selection & modes ----------
 
+    // Replaces the selection (used for "Clear selection").
     private fun setFiles(list: List<Uri>) {
         if (running) { say("Wait for the current batch to finish first"); return }
-        files = list
-        cur = 0
+        files = listOf(); edits.clear()
+        addFiles(list)
+    }
+
+    // Adds files to the selection, skipping ones that are already in it.
+    private fun addFiles(list: List<Uri>) {
+        if (running) { say("Wait for the current batch to finish first"); return }
+        val known = files.toHashSet()
+        val added = list.filter { known.add(it) }
+        added.forEach { videoOf[it] = isVideo(it) }
+        val wasEmpty = files.isEmpty()
+        files = files + added
         if (single) exitSingle()
         updateCount()
+        updateMode()
         adapter.notifyDataSetChanged()
-        grid.setSelection(0)
+        if (wasEmpty) grid.setSelection(0) else if (added.isNotEmpty()) grid.smoothScrollToPosition(files.size - 1)
+        if (added.size < list.size) say("${list.size - added.size} already selected, skipped")
     }
 
     private fun updateCount() {
         go.text = if (files.isEmpty()) "Correct" else "Correct ${files.size}"
         go.isEnabled = files.isNotEmpty() && !running
+        emptyBox.visibility = if (files.isEmpty()) View.VISIBLE else View.GONE
+        grid.visibility = if (files.isEmpty()) View.GONE else View.VISIBLE
+        addMore.visibility = if (files.isNotEmpty() && !single && !running) View.VISIBLE else View.GONE
         updateToolbar()
+    }
+
+    private fun counts(): String {
+        val videos = files.count { videoOf[it] == true }; val photos = files.size - videos
+        return "$photos photo${if (photos == 1) "" else "s"} · $videos video${if (videos == 1) "" else "s"}"
     }
 
     private fun updateToolbar() {
@@ -438,8 +495,7 @@ class MainActivity : AppCompatActivity() {
             menu.add(0, 3, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
         } else {
             toolbar.navigationIcon = null
-            toolbar.title = "DiveFix"; toolbar.subtitle = if (files.isEmpty()) null else "${files.size} selected"
-            menu.add(0, 1, 0, "Add photos and videos").setIcon(R.drawable.ic_add).setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+            toolbar.title = "DiveFix"; toolbar.subtitle = if (files.isEmpty()) null else counts()
             if (files.isNotEmpty()) menu.add(0, 4, 2, "Clear selection")
         }
         menu.add(0, 2, 1, "Camera card folder…")
@@ -452,10 +508,95 @@ class MainActivity : AppCompatActivity() {
         updateCount()
     }
 
+    // Points the sliders at what they now edit: the shown file's settings in the single view, the all-files settings in the grid.
+    private fun selectTarget() {
+        val uri = files.getOrNull(cur)
+        v = if (single && uri != null) edits[uri]?.v ?: g.copyOf() else g
+        for (i in 0 until n) setSlider(i)
+        syncChips()
+        updateMode()
+    }
+
+    // The first change in the single view makes the shown file individual; later changes in the grid leave it alone.
+    private fun adopt() {
+        if (!single || files.isEmpty()) return
+        val uri = files[cur]
+        if (!edits.containsKey(uri)) { edits[uri] = Edit(v); updateMode() }
+    }
+
+    private fun resetIndividual() {
+        val uri = files.getOrNull(cur) ?: return
+        edits.remove(uri)
+        overlay.line = null
+        selectTarget()
+        updateDrawBar()
+        render()
+        say("This ${if (videoOf[uri] == true) "video" else "photo"} uses the settings for all files again")
+    }
+
+    private fun updateMode() {
+        val uri = files.getOrNull(cur)
+        val one = single && uri != null
+        val e = if (one) edits[uri] else null
+        val bg: Int; val fg: Int; val sub: Int
+        if (one) {
+            bg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorPrimaryContainer)
+            fg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorOnPrimaryContainer); sub = fg
+            modeIcon.setImageResource(R.drawable.ic_tune)
+            modeTitle.text = "Only this ${if (videoOf[uri] == true) "video" else "photo"}"
+            modeSub.text = when {
+                e == null -> "Follows the settings for all files. Any change makes it individual."
+                e.line != null -> "Individual settings with a gradient"
+                else -> "Individual settings"
+            }
+        } else {
+            bg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorSurfaceContainerHigh)
+            fg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorOnSurface)
+            sub = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorOnSurfaceVariant)
+            modeIcon.setImageResource(R.drawable.ic_photos)
+            modeTitle.text = "All files"
+            modeSub.text = if (edits.isEmpty()) "Changes apply to every file"
+                else "Changes apply to all except ${edits.size} individually edited (✱)"
+        }
+        modeBar.background = GradientDrawable().apply { setColor(bg); cornerRadius = 12 * dp }
+        modeIcon.imageTintList = ColorStateList.valueOf(fg)
+        modeTitle.setTextColor(fg); modeSub.setTextColor(sub)
+        modeReset.visibility = if (e != null) View.VISIBLE else View.GONE
+    }
+
     private fun enterSingle() {
         single = true
         showMode()
         loadPreview()
+    }
+
+    private fun setDrawMode(on: Boolean) {
+        if (gradientBtn.isChecked != on) { gradientBtn.isChecked = on; return }  // the button's listener calls back here
+        overlay.drawing = on
+        overlay.line = edits[files.getOrNull(cur)]?.line
+        // Make "drawing" unmistakable: the tool fills with the accent colour while it is on.
+        gradientBtn.backgroundTintList = ColorStateList.valueOf(MaterialColors.getColor(gradientBtn,
+            if (on) com.google.android.material.R.attr.colorPrimary else com.google.android.material.R.attr.colorSecondaryContainer))
+        gradientBtn.iconTint = ColorStateList.valueOf(MaterialColors.getColor(gradientBtn,
+            if (on) com.google.android.material.R.attr.colorOnPrimary else com.google.android.material.R.attr.colorOnSecondaryContainer))
+        drawBar.visibility = if (on) View.VISIBLE else View.GONE
+        updateDrawBar()
+    }
+
+    private fun updateDrawBar() {
+        val has = edits[files.getOrNull(cur)]?.line != null
+        drawHint.text = if (has) "Full effect at ●, none at ○" else "Drag across the photo"
+        drawRemove.visibility = if (has) View.VISIBLE else View.GONE
+    }
+
+    // Keeps the overlay's idea of where the photo sits in sync with the image view (fit-center).
+    private fun syncOverlay() {
+        val b = srcBmp ?: return
+        val w = image.width.toFloat(); val h = image.height.toFloat()
+        if (w == 0f || h == 0f) return
+        val sc = minOf(w / b.width, h / b.height)
+        overlay.imgRect.set((w - b.width * sc) / 2, (h - b.height * sc) / 2, (w + b.width * sc) / 2, (h + b.height * sc) / 2)
+        overlay.invalidate()
     }
 
     private fun exitSingle() {
@@ -463,13 +604,16 @@ class MainActivity : AppCompatActivity() {
         fileSeq++; frameSeq++
         frameExec.execute { mmr?.release(); mmr = null }
         single = false
+        setDrawMode(false)
         showMode()
+        selectTarget()
         adapter.notifyDataSetChanged()
         if (files.isNotEmpty()) grid.smoothScrollToPosition(cur)
     }
 
     private fun removeCurrent() {
         if (running || files.isEmpty()) return
+        edits.remove(files[cur])
         files = files.filterIndexed { k, _ -> k != cur }
         cur = cur.coerceAtMost(files.size - 1).coerceAtLeast(0)
         adapter.notifyDataSetChanged()
@@ -491,14 +635,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun userChanged() {
-        applyingPreset = true; chips.clearCheck(); applyingPreset = false  // settings no longer match a preset
+        adopt()
+        syncChips()  // checks a preset chip only if the settings still match it
         render()
     }
 
     private fun applyPreset(name: String) {
         val o = presets.optJSONObject(name) ?: return
+        adopt()
         for (i in 0 until n) { v[i] = o.optDouble(ids[i], base[i].toDouble()).toFloat(); setSlider(i) }
         render()
+    }
+
+    private fun syncChips() {
+        val match = presets.keys().asSequence().firstOrNull { name ->
+            presets.optJSONObject(name)?.let { o -> (0 until n).all { abs(o.optDouble(ids[it], base[it].toDouble()).toFloat() - v[it]) < scale[it] / 2 } } == true
+        }
+        applyingPreset = true
+        chips.clearCheck()
+        for (k in 0 until chips.childCount) (chips.getChildAt(k) as? Chip)?.let { if (it.isCheckable && it.text == match) it.isChecked = true }
+        applyingPreset = false
     }
 
     private fun buildChips(select: String?) {
@@ -555,7 +711,7 @@ class MainActivity : AppCompatActivity() {
     // ---------- colour pipeline ----------
 
     // 3x4 row-major colour matrix on 0..1 RGB: channel mix (red restore), saturation, contrast, brightness.
-    private fun matrix(): FloatArray {
+    private fun matrix(v: FloatArray = this.v): FloatArray {
         val a = v[0] / 100f; val g = 1 + v[1] / 100f; val b = 1 + v[2] / 100f; val br = v[3]; val c = v[4]; val s = v[5]
         val mix = arrayOf(floatArrayOf(1f, a * .5f, a * .2f), floatArrayOf(0f, g, 0f), floatArrayOf(0f, 0f, b))
         val lw = floatArrayOf(.2126f, .7152f, .0722f)
@@ -586,6 +742,37 @@ class MainActivity : AppCompatActivity() {
         return Color.rgb((nr * 255 + .5f).toInt(), (ng * 255 + .5f).toInt(), (nb * 255 + .5f).toInt())
     }
 
+    // One pixel: corrected colour mixed with the original by w (1 = full correction, 0 = original).
+    private fun shade(p: Int, m: FloatArray, pop: Float, w: Float): Int {
+        if (w <= 0f) return p or 0xFF000000.toInt()
+        val c = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop)
+        if (w >= 1f) return c
+        val r0 = p shr 16 and 255; val g0 = p shr 8 and 255; val b0 = p and 255
+        return Color.rgb((r0 + ((c shr 16 and 255) - r0) * w + .5f).toInt(), (g0 + ((c shr 8 and 255) - g0) * w + .5f).toInt(), (b0 + ((c and 255) - b0) * w + .5f).toInt())
+    }
+
+    // The gradient line in pixels, or null if there is none (or it is too short to mean anything).
+    private fun usableLine(l: FloatArray?, w: Int, h: Int) = l?.takeIf { val dx = (it[2] - it[0]) * w; val dy = (it[3] - it[1]) * h; dx * dx + dy * dy > 4f }
+
+    // One image row. With a line: full effect behind the start's perpendicular, fading linearly to none at the end's.
+    private fun correctRow(src: IntArray, dst: IntArray, off: Int, w: Int, y: Int, h: Int, m: FloatArray, pop: Float, line: FloatArray?) {
+        if (line == null) { for (x in 0 until w) dst[off + x] = shade(src[off + x], m, pop, 1f); return }
+        val ax = line[0] * w; val ay = line[1] * h; val dx = (line[2] - line[0]) * w; val dy = (line[3] - line[1]) * h
+        val l2 = dx * dx + dy * dy
+        val t0 = ((.5f - ax) * dx + (y + .5f - ay) * dy) / l2; val dt = dx / l2
+        for (x in 0 until w) dst[off + x] = shade(src[off + x], m, pop, 1f - (t0 + x * dt))
+    }
+
+    private fun correct(px: IntArray, w: Int, h: Int, s: FloatArray, line: FloatArray?): IntArray {
+        val m = matrix(s); val pop = s[6] / 100f; val l = usableLine(line, w, h)
+        val out = IntArray(px.size)
+        for (y in 0 until h) correctRow(px, out, y * w, w, y, h, m, pop, l)
+        return out
+    }
+
+    private fun settingsFor(uri: Uri) = edits[uri]?.v ?: g
+    private fun keyFor(uri: Uri) = settingsFor(uri).contentHashCode() * 31 + (edits[uri]?.line?.contentHashCode() ?: 0)
+
     private fun lut(m: FloatArray, pop: Float) =
         SingleColorLut.createFromCube(Array(33) { r -> Array(33) { g -> IntArray(33) { b -> fx(r / 32f, g / 32f, b / 32f, m, pop) } } })
 
@@ -595,15 +782,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun render() {
         val seq = ++renderSeq
-        val m = matrix(); val pop = v[6] / 100f
         if (player != null) { ui.removeCallbacks(applyFx); ui.postDelayed(applyFx, 150) }
-        if (!single) { renderThumbs((0 until grid.childCount).mapNotNull { grid.getChildAt(it).tag as? Uri }, m, pop, seq); return }
+        if (!single) { renderThumbs((0 until grid.childCount).mapNotNull { grid.getChildAt(it).tag as? Uri }, seq); return }
         val px = srcPx ?: return
         val src = srcBmp ?: return
+        val s = v.copyOf(); val line = edits[files.getOrNull(cur)]?.line?.copyOf()
         renderer.execute {
             if (seq != renderSeq) return@execute
-            val out = IntArray(px.size)
-            for (k in px.indices) { val p = px[k]; out[k] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
+            val out = correct(px, src.width, src.height, s, line)
             val bmp = Bitmap.createBitmap(out, src.width, src.height, Bitmap.Config.ARGB_8888)
             val h = hist(out)
             runOnUiThread { if (seq == renderSeq) { outBmp = bmp; outHist = h; display() } }
@@ -622,6 +808,7 @@ class MainActivity : AppCompatActivity() {
         if (holding == on) return
         holding = on
         originalTag.visibility = if (on) View.VISIBLE else View.GONE
+        if (overlay.drawing) drawBar.visibility = if (on) View.INVISIBLE else View.VISIBLE
         fullOriginal.visibility = originalTag.visibility
         display()
         if (player != null) { ui.removeCallbacks(applyFx); applyFx.run() }
@@ -652,6 +839,10 @@ class MainActivity : AppCompatActivity() {
                     fontFeatureSettings = "tnum"; setPadding((3 * dp).toInt(), 0, 0, 0)
                 })
             }, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
+            addView(FrameLayout(context).apply {  // ✱ individually edited
+                setBackgroundResource(R.drawable.pill); setPadding((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
+                addView(icon(R.drawable.ic_asterisk), FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt()))
+            }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.START).apply { setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, 0) })
         }
     }
 
@@ -661,13 +852,14 @@ class MainActivity : AppCompatActivity() {
         val img = cell.getChildAt(0) as ImageView
         val where = cell.getChildAt(1) as LinearLayout
         val vid = cell.getChildAt(2) as LinearLayout
+        cell.getChildAt(3).visibility = if (edits.containsKey(uri)) View.VISIBLE else View.GONE
         val t = thumbs.get(uri)
         if (t == null) {
             img.setImageBitmap(null); where.visibility = View.GONE; vid.visibility = View.GONE
             if (loading.add(uri)) {
-                val seq = renderSeq; val m = matrix(); val pop = v[6] / 100f
+                val s = settingsFor(uri).copyOf(); val line = edits[uri]?.line?.copyOf(); val key = keyFor(uri)
                 thumbLoader.execute {
-                    val th = loadThumb(uri, m, pop, seq)
+                    val th = loadThumb(uri, s, line, key)
                     runOnUiThread { loading.remove(uri); thumbs.put(uri, th); cellFor(uri)?.let { bindCell(it, uri) } }
                 }
             }
@@ -680,10 +872,10 @@ class MainActivity : AppCompatActivity() {
         where.getChildAt(1).visibility = if (card) View.VISIBLE else View.GONE
         vid.visibility = if (t.dur >= 0) View.VISIBLE else View.GONE
         (vid.getChildAt(1) as TextView).text = "%d:%02d".format(t.dur / 60000, t.dur / 1000 % 60)
-        if (t.ver != renderSeq) renderThumbs(listOf(uri), matrix(), v[6] / 100f, renderSeq)
+        if (t.key != keyFor(uri)) renderThumbs(listOf(uri), renderSeq)
     }
 
-    private fun loadThumb(uri: Uri, m: FloatArray, pop: Float, seq: Int): Thumb {
+    private fun loadThumb(uri: Uri, s: FloatArray, line: FloatArray?, key: Int): Thumb {
         val video = isVideo(uri)
         val bmp = (runCatching { contentResolver.loadThumbnail(uri, Size(384, 384), null) }.getOrNull() ?: runCatching {
             if (video) MediaMetadataRetriever().run {
@@ -699,23 +891,23 @@ class MainActivity : AppCompatActivity() {
         }.getOrDefault(0L)
         val outName = outName(uri, video)
         val phone = runCatching { existing(outName, video) != null }.getOrDefault(false)
-        if (bmp == null) return Thumb(IntArray(0), 0, 0, dur, outName, phone, null, seq)
+        if (bmp == null) return Thumb(IntArray(0), 0, 0, dur, outName, phone, null, key)
         val px = IntArray(bmp.width * bmp.height).also { bmp.getPixels(it, 0, bmp.width, 0, 0, bmp.width, bmp.height) }
-        val out = IntArray(px.size)
-        for (k in px.indices) { val p = px[k]; out[k] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
-        return Thumb(px, bmp.width, bmp.height, dur, outName, phone, Bitmap.createBitmap(out, bmp.width, bmp.height, Bitmap.Config.ARGB_8888), seq)
+        val out = correct(px, bmp.width, bmp.height, s, line)
+        return Thumb(px, bmp.width, bmp.height, dur, outName, phone, Bitmap.createBitmap(out, bmp.width, bmp.height, Bitmap.Config.ARGB_8888), key)
     }
 
-    private fun renderThumbs(list: List<Uri>, m: FloatArray, pop: Float, seq: Int) {
+    // Re-renders thumbnails whose settings changed; each file uses its own settings, so grid edits skip individual files.
+    private fun renderThumbs(list: List<Uri>, seq: Int) {
+        val jobs = list.map { uri -> Triple(uri, settingsFor(uri).copyOf(), edits[uri]?.line?.copyOf()) to keyFor(uri) }
         thumbRenderer.execute {
-            for (uri in list) {
+            for ((job, key) in jobs) {
+                val (uri, s, line) = job
                 if (seq != renderSeq) return@execute
                 val t = thumbs.get(uri) ?: continue
-                if (t.ver == seq || t.w == 0) continue
-                val out = IntArray(t.px.size)
-                for (k in out.indices) { val p = t.px[k]; out[k] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
-                val bmp = Bitmap.createBitmap(out, t.w, t.h, Bitmap.Config.ARGB_8888)
-                runOnUiThread { if (seq == renderSeq) { t.out = bmp; t.ver = seq; (cellFor(uri)?.getChildAt(0) as? ImageView)?.setImageBitmap(bmp) } }
+                if (t.key == key || t.w == 0) continue
+                val bmp = Bitmap.createBitmap(correct(t.px, t.w, t.h, s, line), t.w, t.h, Bitmap.Config.ARGB_8888)
+                runOnUiThread { if (seq == renderSeq) { t.out = bmp; t.key = key; (cellFor(uri)?.getChildAt(0) as? ImageView)?.setImageBitmap(bmp) } }
             }
         }
     }
@@ -735,6 +927,9 @@ class MainActivity : AppCompatActivity() {
         prevBtn.visibility = if (files.size > 1) View.VISIBLE else View.GONE
         nextBtn.visibility = prevBtn.visibility
         videoRow.visibility = if (video) View.VISIBLE else View.GONE
+        gradientBtn.visibility = if (video) View.GONE else View.VISIBLE  // gradients are for photos
+        setDrawMode(false)
+        selectTarget()
         srcBmp = null; srcPx = null; outBmp = null; srcHist = null; outHist = null
         image.setImageBitmap(null); histo.data = null
         videoPos = 0; videoDur = 0; timeline.value = 0f; timeline.valueTo = 1f; timeTv.text = ""
@@ -783,6 +978,7 @@ class MainActivity : AppCompatActivity() {
             if (seq != frameSeq) return@runOnUiThread
             if (bmp == null) { say("Can't open ${fileTitle}"); return@runOnUiThread }
             srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
+            syncOverlay()
             if (player?.playWhenReady != true) { image.visibility = View.VISIBLE; histo.visibility = View.VISIBLE }
             if (full.isShowing) orientFull()
             render()
@@ -983,8 +1179,8 @@ class MainActivity : AppCompatActivity() {
     private fun startBatch() {
         releasePlayer()
         running = true; cancelled = false; saved = 0; failed = 0; lastError = null; batchDest = dest
-        go.isEnabled = false; destGroup.isEnabled = false; updateToolbar()
-        val m = matrix(); val pop = v[6] / 100f
+        destGroup.isEnabled = false; updateCount()
+        val plan = files.map { settingsFor(it).copyOf() to edits[it]?.line?.copyOf() }  // each file with its own settings
         thread {
             val ok = batchDest == 0 || openCard(true)
             runOnUiThread {
@@ -996,7 +1192,7 @@ class MainActivity : AppCompatActivity() {
                 idleRow.visibility = View.GONE; runRow.visibility = View.VISIBLE
                 progress.setProgressCompat(0, false)
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                process(0, m, pop)
+                process(0, plan)
             }
         }
     }
@@ -1018,9 +1214,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun process(i: Int, m: FloatArray, pop: Float) {
+    private fun process(i: Int, plan: List<Pair<FloatArray, FloatArray?>>) {
         if (!running) return
         if (cancelled || i >= files.size) { finishBatch(); return }
+        val m = matrix(plan[i].first); val pop = plan[i].first[6] / 100f
         val uri = files[i]
         val name = nameOf(uri)
         val base = name.substringBeforeLast('.') + "_fix"
@@ -1036,9 +1233,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     val w = bmp.width
                     val row = IntArray(w)
+                    val line = usableLine(plan[i].second, w, bmp.height)
                     for (y in 0 until bmp.height) {
                         bmp.getPixels(row, 0, w, 0, y, w, 1)
-                        for (x in 0 until w) { val p = row[x]; row[x] = fx((p shr 16 and 255) / 255f, (p shr 8 and 255) / 255f, (p and 255) / 255f, m, pop) }
+                        correctRow(row, row, 0, w, y, bmp.height, m, pop, line)
                         bmp.setPixels(row, 0, w, 0, y, w, 1)
                     }
                     tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
@@ -1050,7 +1248,7 @@ class MainActivity : AppCompatActivity() {
                     save(tmp, "$base.jpg", false, null)
                 }
                 tmp.delete()
-                runOnUiThread { tally(result); process(i + 1, m, pop) }
+                runOnUiThread { tally(result); process(i + 1, plan) }
             }
             return
         }
@@ -1083,13 +1281,13 @@ class MainActivity : AppCompatActivity() {
                     thread {
                         val result = runCatching { save(tmp, "$base.mp4", true, taken) }
                         tmp.delete()
-                        runOnUiThread { tally(result); process(i + 1, m, pop) }
+                        runOnUiThread { tally(result); process(i + 1, plan) }
                     }
                 }
 
                 override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                     tmp.delete(); failed++; lastError = exportException.message
-                    process(i + 1, m, pop)
+                    process(i + 1, plan)
                 }
             })
             .build()
