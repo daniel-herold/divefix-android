@@ -12,9 +12,11 @@ import android.view.View
 import kotlin.math.hypot
 
 /**
- * Draws the gradient line over the photo and, in draw mode, lets the user drag a new one.
- * The line is stored as x0, y0, x1, y1 in 0..1 image coordinates: full effect behind the start's
- * perpendicular, fading to none at the end's perpendicular.
+ * Draws the gradient over the photo and, in draw mode, lets the user drag a new one (also starting outside the photo).
+ * Stored as x0, y0, x1, y1, kind in 0..1 image coordinates.
+ *  kind 0, linear: full effect behind the start's perpendicular, fading to none at the end's.
+ *  kind 1, circle: centre at the start, radius to the end; full effect in the centre, none at the circle and beyond.
+ *  kind 2, circle: the opposite, none in the centre, full effect at the circle and beyond.
  */
 class LineOverlay @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
     val imgRect = RectF()  // where the photo is shown inside this view
@@ -23,6 +25,7 @@ class LineOverlay @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? =
     var drawing = false
         set(value) { field = value; invalidate() }
     var onLine: ((FloatArray) -> Unit)? = null
+    var kind = 0  // the tool used for the next drag
 
     private val d = resources.displayMetrics.density
     private val shadow = 0x99000000.toInt()
@@ -44,7 +47,7 @@ class LineOverlay @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? =
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> { start = floatArrayOf(x, y); downX = e.x; downY = e.y; parent.requestDisallowInterceptTouchEvent(true) }
             MotionEvent.ACTION_MOVE -> start?.let { s ->
-                if (hypot(e.x - downX, e.y - downY) > 12 * d) floatArrayOf(s[0], s[1], x, y).let { line = it; onLine?.invoke(it) }
+                if (hypot(e.x - downX, e.y - downY) > 12 * d) floatArrayOf(s[0], s[1], x, y, kind.toFloat()).let { line = it; onLine?.invoke(it) }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> start = null
         }
@@ -58,6 +61,15 @@ class LineOverlay @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? =
         val bx = imgRect.left + l[2] * imgRect.width(); val by = imgRect.top + l[3] * imgRect.height()
         val len = hypot(bx - ax, by - ay)
         if (len < 1f) return
+        val k = l.getOrElse(4) { 0f }.toInt()
+        if (k != 0) {  // circle: dashed border, centre and edge handle
+            c.drawCircle(ax, ay, len, guide)
+            c.drawLine(ax, ay, bx, by, guide)
+            if (k == 1) { c.drawCircle(ax, ay, 7 * d, dot); c.drawCircle(bx, by, 7 * d, stroke) } else { c.drawCircle(ax, ay, 7 * d, stroke); c.drawCircle(bx, by, 7 * d, dot) }
+            c.drawText(if (k == 1) "100%" else "0%", ax + 10 * d, ay - 10 * d, label)
+            c.drawText(if (k == 1) "0%" else "100%", bx + 10 * d, by - 10 * d, label)
+            return
+        }
         val px = -(by - ay) / len * 5000f; val py = (bx - ax) / len * 5000f
         c.save()
         c.clipRect(imgRect)

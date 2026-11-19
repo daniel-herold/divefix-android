@@ -35,7 +35,7 @@ class LayoutShots {
         p.shader = null; p.color = Color.rgb(200, 120 + seed * 7, 80); c.drawCircle(w * .4f + seed * 9, h * .55f, h * .12f, p)
     }
 
-    private fun fill(root: View, singleView: Boolean, columns: Int = 3, sel: Set<Int> = emptySet()) {
+    private fun fill(root: View, singleView: Boolean, columns: Int = 3, sel: Set<Int> = emptySet(), drawingShot: Boolean = true) {
         val ctx = root.context; val dp = ctx.resources.displayMetrics.density
         root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
             if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.JPG"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
@@ -95,7 +95,7 @@ class LayoutShots {
             root.findViewById<View>(R.id.addMore).visibility = if (sel.isEmpty()) View.VISIBLE else View.GONE
             root.findViewById<View>(R.id.gridCompare).apply {
                 visibility = View.VISIBLE
-                (layoutParams as FrameLayout.LayoutParams).marginEnd = ((if (sel.isEmpty()) 84 else 16) * dp).toInt()
+                (layoutParams as FrameLayout.LayoutParams).marginEnd = (16 * dp).toInt()
             }
             if (sel.isNotEmpty()) {
                 root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
@@ -114,18 +114,26 @@ class LayoutShots {
             root.findViewById<View>(R.id.videoRow).visibility = View.VISIBLE
             root.findViewById<TextView>(R.id.time).text = "0:12 / 0:42"
             root.findViewById<Slider>(R.id.timeline).apply { valueTo = 42f; value = 12f }
+            root.findViewById<View>(R.id.videoRow).visibility = View.GONE
+            val primary = android.content.res.ColorStateList.valueOf(0xFF6CCFDD.toInt()); val onPrimary = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
+            val dark = android.content.res.ColorStateList.valueOf(0xFF323536.toInt()); val onDark = android.content.res.ColorStateList.valueOf(0xFFE1E3E3.toInt())
+            val tools = listOf(R.id.gradLinear, R.id.gradIn, R.id.gradOut).map { root.findViewById<com.google.android.material.button.MaterialButton>(it) }
             root.findViewById<LineOverlay>(R.id.lineOverlay).apply {
                 imgRect.set(0f, (393 * dp - 393 * dp * 720 / 1280) / 2, 393 * dp, (393 * dp + 393 * dp * 720 / 1280) / 2)
-                drawing = true; line = floatArrayOf(.25f, .75f, .62f, .3f)
+                drawing = drawingShot; line = if (drawingShot) floatArrayOf(.25f, .75f, .62f, .3f, 0f) else null
             }
-            root.findViewById<View>(R.id.drawBar).visibility = View.VISIBLE
-            root.findViewById<TextView>(R.id.drawHint).text = "Drag again to redraw · ● full effect, ○ none"
-            val on = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
-            root.findViewById<View>(R.id.gradientGroup).background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF6CCFDD.toInt()); cornerRadius = 24 * dp }
-            root.findViewById<com.google.android.material.button.MaterialButton>(R.id.gradientBtn).apply { backgroundTintList = android.content.res.ColorStateList.valueOf(0); iconTint = on }
-            listOf(R.id.gradientSave, R.id.gradientDiscard).forEach { root.findViewById<com.google.android.material.button.MaterialButton>(it).apply { visibility = View.VISIBLE; iconTint = on } }
-            root.findViewById<View>(R.id.videoRow).visibility = View.GONE
-            root.findViewById<View>(R.id.histo).visibility = View.GONE
+            if (drawingShot) {  // drawing a line: one pill with the three tools, ✓ and ✕; compare as an icon
+                root.findViewById<View>(R.id.drawBar).visibility = View.VISIBLE
+                root.findViewById<TextView>(R.id.drawHint).text = "Drag a line: ● full effect → ○ none"
+                root.findViewById<View>(R.id.gradientGroup).background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF323536.toInt()); cornerRadius = 28 * dp }
+                tools.forEachIndexed { k, b -> b.backgroundTintList = if (k == 0) primary else android.content.res.ColorStateList.valueOf(0); b.iconTint = if (k == 0) onPrimary else onDark }
+                listOf(R.id.gradientSave, R.id.gradientDiscard).forEach { root.findViewById<com.google.android.material.button.MaterialButton>(it).apply { visibility = View.VISIBLE; iconTint = onDark } }
+                root.findViewById<View>(R.id.compare).visibility = View.GONE
+                root.findViewById<View>(R.id.compareIcon).visibility = View.VISIBLE
+                listOf(R.id.prev, R.id.next, R.id.histo).forEach { root.findViewById<View>(it).visibility = View.GONE }
+            } else {  // a circle gradient is applied: that tool is accent-filled, the others dark
+                tools.forEachIndexed { k, b -> b.backgroundTintList = if (k == 1) primary else dark; b.iconTint = if (k == 1) onPrimary else onDark }
+            }
             root.findViewById<Histo>(R.id.histo).data = Array(3) { ch -> IntArray(64) { i -> (1000 * Math.exp(-Math.pow((i - 20.0 - ch * 8) / 9.0, 2.0))).toInt() + 20 } }
         }
         val chips = root.findViewById<ChipGroup>(R.id.presets)
@@ -172,6 +180,12 @@ class LayoutShots {
         val root = paparazzi.inflate<View>(R.layout.activity_main)
         root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
         fill(root, false, sel = setOf(1, 3, 4)); paparazzi.snapshot(root)
+    }
+
+    @Test fun singleCircle() {
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
+        fill(root, true, drawingShot = false); paparazzi.snapshot(root)
     }
 
     @Test fun single() {

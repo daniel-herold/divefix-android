@@ -88,7 +88,11 @@ import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.widget.PopupWindow
 import android.widget.ScrollView
+import android.view.ScaleGestureDetector
+import android.view.ViewConfiguration
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.sqrt
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
@@ -102,7 +106,8 @@ class MainActivity : AppCompatActivity() {
     private val dots = intArrayOf(0xFFE5604D.toInt(), 0xFF5CC27F.toInt(), 0xFF5B8DEF.toInt(), 0, 0, 0, 0)
     // Shallow ~0-5 m, Medium ~5-15 m, Deep ~15 m+. Red is absorbed first, so it needs the most help, then blue and green are
     // pulled back; deeper water is darker and hazier, so brightness, contrast and colour get a little more too.
-    private val defaults = """{"Shallow":{"red":45,"green":-3,"blue":-8,"bright":0,"contrast":1.08,"sat":1.05,"pop":15},"Medium":{"red":80,"green":-6,"blue":-12,"bright":0.02,"contrast":1.12,"sat":1.1,"pop":25},"Deep":{"red":100,"green":-9,"blue":-20,"bright":0.04,"contrast":1.16,"sat":1.15,"pop":35}}"""
+    private val defaults = """{"Shallow":{"red":20,"green":-1.5,"blue":-4,"bright":0,"contrast":1.04,"sat":1,"pop":10},"Medium":{"red":40,"green":-3,"blue":-8,"bright":0.01,"contrast":1.06,"sat":1.05,"pop":15},"Deep":{"red":60,"green":-4.5,"blue":-12,"bright":0.02,"contrast":1.08,"sat":1.1,"pop":20}}"""
+    private val defaultsV2 = """{"Shallow":{"red":45,"green":-3,"blue":-8,"bright":0,"contrast":1.08,"sat":1.05,"pop":15},"Medium":{"red":80,"green":-6,"blue":-12,"bright":0.02,"contrast":1.12,"sat":1.1,"pop":25},"Deep":{"red":100,"green":-9,"blue":-20,"bright":0.04,"contrast":1.16,"sat":1.15,"pop":35}}"""
     private val icons = intArrayOf(0, 0, 0, R.drawable.ic_brightness, R.drawable.ic_contrast, R.drawable.ic_saturation, R.drawable.ic_vibrance)
     private val hints = arrayOf<String?>(null, null, null,
         "Lightens or darkens the whole picture evenly. Deeper dives are darker, so raise it a little there.",
@@ -193,7 +198,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var nextBtn: Button
     private lateinit var histo: Histo
     private lateinit var overlay: LineOverlay
-    private lateinit var gradientBtn: MaterialButton
+    private lateinit var gradBtns: List<MaterialButton>  // linear, circle (full inside), circle (full outside)
+    private lateinit var compareBtn: View
+    private lateinit var compareIcon: View
+    private var drawKind = 0
     private lateinit var drawBar: View
     private lateinit var drawHint: TextView
     private lateinit var gradientGroup: LinearLayout
@@ -303,7 +311,9 @@ class MainActivity : AppCompatActivity() {
         drawBar = findViewById(R.id.drawBar)
         drawHint = findViewById(R.id.drawHint)
         gradientGroup = findViewById(R.id.gradientGroup)
-        gradientBtn = findViewById<MaterialButton>(R.id.gradientBtn).apply { setOnClickListener { setDrawMode(!drawMode) } }  // tapping again keeps the line
+        gradBtns = listOf(R.id.gradLinear, R.id.gradIn, R.id.gradOut).mapIndexed { k, id ->
+            findViewById<MaterialButton>(id).apply { setOnClickListener { drawKind = k; if (drawMode) { this@MainActivity.overlay.kind = k; updateDrawBar() } else setDrawMode(true) } }
+        }
         gradientSave = findViewById<View>(R.id.gradientSave).apply { setOnClickListener { setDrawMode(false) } }
         gradientDiscard = findViewById<View>(R.id.gradientDiscard).apply {
             setOnClickListener { edits[files[cur]]?.line = null; render(); updateMode(); setDrawMode(false) }
@@ -317,7 +327,8 @@ class MainActivity : AppCompatActivity() {
             }
             false  // let the button show its pressed state
         }
-        findViewById<View>(R.id.compare).setOnTouchListener(compareTouch)
+        compareBtn = findViewById<View>(R.id.compare).apply { setOnTouchListener(compareTouch) }
+        compareIcon = findViewById<View>(R.id.compareIcon).apply { setOnTouchListener(compareTouch) }
         gridCompare.setOnTouchListener(compareTouch)
         singleBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> player?.let { fitSurface(it.videoSize) }; syncOverlay() }
         videoRow = findViewById(R.id.videoRow)
@@ -392,6 +403,14 @@ class MainActivity : AppCompatActivity() {
             presets = merged
             prefs.edit().putString("presets", presets.toString()).putInt("presetsVersion", 2).apply()
         }
+        if (prefs.getInt("presetsVersion", 1) < 3) {  // gentler defaults; a default the user has changed is kept
+            val v2 = JSONObject(defaultsV2); val v3 = JSONObject(defaults)
+            for (name in v3.keys().asSequence().toList()) {
+                val mine = presets.optJSONObject(name); val was = v2.optJSONObject(name)
+                if (mine == null || (was != null && ids.all { abs(mine.optDouble(it) - was.optDouble(it)) < 1e-6 })) presets.put(name, v3.getJSONObject(name))
+            }
+            prefs.edit().putString("presets", presets.toString()).putInt("presetsVersion", 3).apply()
+        }
         chips = findViewById(R.id.presets)
         chips.setOnCheckedStateChangeListener { g, checked ->
             if (applyingPreset || checked.isEmpty()) return@setOnCheckedStateChangeListener
@@ -420,7 +439,7 @@ class MainActivity : AppCompatActivity() {
         // ---------- full screen: landscape images are turned to fill a portrait screen ----------
         fullImg = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
         fullHisto = Histo(this)
-        fullHint = pillText("Hold anywhere to see the original · Back to return")
+        fullHint = pillText("Pinch to zoom · Hold for the original · Back to return")
         fullOriginal = pillText("Original").apply { visibility = View.GONE }
         rotBox = FrameLayout(this).apply {
             addView(fullImg, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -432,13 +451,32 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             addView(rotBox, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or2, ob -> if (r - l != or2 - ol || b - t != ob - ot) post { orientFull() } }
-            setOnTouchListener { view, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> { fullHint.visibility = View.GONE; hold(true) }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { hold(false); view.performClick() }
-                }
-                true
+        }
+        // Touches go to the (possibly rotated) box, so gestures follow the picture's own orientation.
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        val holdLater = Runnable { hold(true) }
+        var lastX = 0f; var lastY = 0f; var downX = 0f; var downY = 0f; var multi = false; var fx = 0f; var fy = 0f
+        val pinch = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(d: ScaleGestureDetector): Boolean { fx = d.focusX; fy = d.focusY; return true }
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                zoomBy(d.scaleFactor, d.focusX, d.focusY, d.focusX - fx, d.focusY - fy); fx = d.focusX; fy = d.focusY; return true
             }
+        })
+        val taps = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean { ui.removeCallbacks(holdLater); hold(false); if (zoom > 1.01f) resetZoom() else zoomBy(2.5f, e.x, e.y, 0f, 0f); return true }
+        })
+        rotBox.setOnTouchListener { view, e ->
+            pinch.onTouchEvent(e); taps.onTouchEvent(e)
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { fullHint.visibility = View.GONE; lastX = e.x; lastY = e.y; downX = e.x; downY = e.y; multi = false; ui.postDelayed(holdLater, 180) }
+                MotionEvent.ACTION_POINTER_DOWN -> { multi = true; ui.removeCallbacks(holdLater); hold(false) }
+                MotionEvent.ACTION_MOVE -> if (!multi && e.pointerCount == 1) {
+                    if (hypot(e.x - downX, e.y - downY) > slop) { ui.removeCallbacks(holdLater); if (zoom > 1.01f) { hold(false); zoomBy(1f, e.x, e.y, e.x - lastX, e.y - lastY) } }
+                    lastX = e.x; lastY = e.y
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { ui.removeCallbacks(holdLater); hold(false); view.performClick() }
+            }
+            true
         }
         full = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply { setContentView(fullRoot); setOnDismissListener { hold(false) } }
 
@@ -492,7 +530,7 @@ class MainActivity : AppCompatActivity() {
             "What DiveFix does" to "Water swallows red light first, so dive photos and videos turn blue-green. DiveFix brings the colours back with a few simple settings and saves corrected copies. Your originals are never changed, and everything runs offline on your phone.",
             "All files or individual" to "In the grid, the settings apply to all files. Open a file, or long-press to select several, and changes apply only to those: they become individual (✱) and later grid changes skip them. Reset returns them to the settings for all files.",
             "Presets" to "Shallow, Medium and Deep are starting points for typical depths. Save your own with + Save preset; long-press a preset to update, rename or delete it.",
-            "Gradient (photos)" to "Fades the correction from full strength at ● to none at ○, for example when the top and bottom of a shot were lit differently.",
+            "Gradients (photos)" to "Limit the correction to part of a photo. Line: full strength at ● fading to none at ○. Circles: drag from the centre outwards; one keeps the effect inside the circle, the other outside. You can start outside the photo. Only one gradient per photo: drawing a new one replaces it.",
             "Saving" to "Phone saves to DCIM/DiveFix, where your gallery shows it. Card saves to a DiveFix folder on the camera's card. Copies get _fix in the name, and correcting a file again replaces its earlier copy. Capture date and location are kept.",
             "Camera card" to "Set the camera to USB mode, connect it and add files with +. Don't unplug while saving. Originals and corrected copies on the same card are not a backup: copy them somewhere else too.",
             "Kept only while the app is open" to "The list of files and all individual settings (✱, gradients) are temporary. Presets and the save location are remembered.",
@@ -583,7 +621,6 @@ class MainActivity : AppCompatActivity() {
         grid.visibility = if (files.isEmpty()) View.GONE else View.VISIBLE
         addMore.visibility = if (files.isNotEmpty() && !single && !running && !selecting) View.VISIBLE else View.GONE
         gridCompare.visibility = if (files.isNotEmpty() && !single) View.VISIBLE else View.GONE
-        (gridCompare.layoutParams as FrameLayout.LayoutParams).marginEnd = ((if (addMore.visibility == View.VISIBLE) 84 else 16) * dp).toInt()
         updateToolbar()
     }
 
@@ -715,7 +752,7 @@ class MainActivity : AppCompatActivity() {
             modeTitle.text = "Only this ${if (videoOf[uri] == true) "video" else "photo"}"
             modeSub.text = when {
                 e == null -> "Follows the settings for all files. Any change makes it individual."
-                e.line != null -> "Individual settings with a gradient"
+                e.line != null -> "Individual settings with a ${if (e.line!!.getOrElse(4) { 0f } == 0f) "linear" else "circle"} gradient"
                 else -> "Individual settings"
             }
         } else {
@@ -743,32 +780,42 @@ class MainActivity : AppCompatActivity() {
     private fun setDrawMode(on: Boolean) {
         drawMode = on
         overlay.drawing = on
+        overlay.kind = drawKind
         overlay.line = edits[files.getOrNull(cur)]?.line
         drawBar.visibility = if (on) View.VISIBLE else View.GONE
-        histo.visibility = if (on || player?.playWhenReady == true) View.GONE else View.VISIBLE  // room for the expanded tool
+        histo.visibility = if (on || player?.playWhenReady == true) View.GONE else View.VISIBLE  // the hint sits at the top while drawing
+        findViewById<View>(R.id.prev).visibility = if (on) View.GONE else View.VISIBLE  // keep the edges free for drawing
+        findViewById<View>(R.id.next).visibility = findViewById<View>(R.id.prev).visibility
+        compareBtn.visibility = if (on) View.GONE else View.VISIBLE  // compare shrinks to its icon to make room for ✓ ✕
+        compareIcon.visibility = if (on) View.VISIBLE else View.GONE
         updateDrawBar()
     }
 
-    // Off: plain tool button. Drawing: the tool fills with the accent colour. Once a line exists it expands to [tool | ✓ keep | ✕ discard].
+    // Each tool is dark, or accent-filled when its gradient is applied to this photo. Pressing one opens drawing mode:
+    // the tools join one pill with ✓ (done, keep) and ✕ (remove the gradient); the tool being drawn with is filled.
     private fun updateDrawBar() {
-        val has = edits[files.getOrNull(cur)]?.line != null
-        val expanded = drawMode && has
-        drawHint.text = if (has) "Drag again to redraw · ● full effect, ○ none" else "Drag across the photo"
-        val color = { attr: Int -> MaterialColors.getColor(gradientBtn, attr) }
+        val applied = edits[files.getOrNull(cur)]?.line?.getOrElse(4) { 0f }?.toInt() ?: -1
+        drawHint.text = when (drawKind) {
+            0 -> "Drag a line: ● full effect → ○ none"
+            1 -> "Drag from the centre: full inside, none at the circle"
+            else -> "Drag from the centre: none inside, full at the circle"
+        }
+        val color = { attr: Int -> MaterialColors.getColor(gradientGroup, attr) }
         val primary = color(com.google.android.material.R.attr.colorPrimary)
         val onPrimary = color(com.google.android.material.R.attr.colorOnPrimary)
+        val dark = color(com.google.android.material.R.attr.colorSurfaceContainerHighest)
+        val onDark = color(com.google.android.material.R.attr.colorOnSurface)
         TransitionManager.beginDelayedTransition(gradientGroup, AutoTransition().setDuration(150))
-        gradientSave.visibility = if (expanded) View.VISIBLE else View.GONE
+        gradientSave.visibility = if (drawMode) View.VISIBLE else View.GONE
         gradientDiscard.visibility = gradientSave.visibility
-        gradientGroup.background = if (expanded) GradientDrawable().apply { setColor(primary); cornerRadius = 24 * dp } else null
-        gradientBtn.backgroundTintList = ColorStateList.valueOf(when {
-            expanded -> Color.TRANSPARENT
-            drawMode -> primary
-            else -> color(com.google.android.material.R.attr.colorSecondaryContainer)
-        })
-        gradientBtn.iconTint = ColorStateList.valueOf(if (drawMode) onPrimary else color(com.google.android.material.R.attr.colorOnSecondaryContainer))
-        (gradientSave as MaterialButton).iconTint = ColorStateList.valueOf(onPrimary)
-        (gradientDiscard as MaterialButton).iconTint = ColorStateList.valueOf(onPrimary)
+        gradientGroup.background = if (drawMode) GradientDrawable().apply { setColor(dark); cornerRadius = 28 * dp } else null
+        for ((k, b) in gradBtns.withIndex()) {
+            val filled = if (drawMode) k == drawKind else k == applied
+            b.backgroundTintList = ColorStateList.valueOf(if (filled) primary else if (drawMode) Color.TRANSPARENT else dark)
+            b.iconTint = ColorStateList.valueOf(if (filled) onPrimary else if (k == applied) primary else onDark)  // applied but not drawn with: accent icon
+        }
+        (gradientSave as MaterialButton).iconTint = ColorStateList.valueOf(onDark)
+        (gradientDiscard as MaterialButton).iconTint = ColorStateList.valueOf(onDark)
     }
 
     // Keeps the overlay's idea of where the photo sits in sync with the image view (fit-center).
@@ -943,6 +990,15 @@ class MainActivity : AppCompatActivity() {
         if (line == null) { for (x in 0 until w) dst[off + x] = shade(src[off + x], m, pop, 1f); return }
         val ax = line[0] * w; val ay = line[1] * h; val dx = (line[2] - line[0]) * w; val dy = (line[3] - line[1]) * h
         val l2 = dx * dx + dy * dy
+        val kind = line.getOrElse(4) { 0f }
+        if (kind != 0f) {  // circle around the start point, radius to the end point
+            val inv = 1f / sqrt(l2); val yy = y + .5f - ay
+            for (x in 0 until w) {
+                val xx = x + .5f - ax; val r = sqrt(xx * xx + yy * yy) * inv
+                dst[off + x] = shade(src[off + x], m, pop, if (kind == 1f) 1f - r else r)
+            }
+            return
+        }
         val t0 = ((.5f - ax) * dx + (y + .5f - ay) * dy) / l2; val dt = dx / l2
         for (x in 0 until w) dst[off + x] = shade(src[off + x], m, pop, 1f - (t0 + x * dt))
     }
@@ -1129,7 +1185,7 @@ class MainActivity : AppCompatActivity() {
         prevBtn.visibility = if (files.size > 1) View.VISIBLE else View.GONE
         nextBtn.visibility = prevBtn.visibility
         videoRow.visibility = if (video) View.VISIBLE else View.GONE
-        gradientBtn.visibility = if (video) View.GONE else View.VISIBLE  // gradients are for photos
+        gradientGroup.visibility = if (video) View.GONE else View.VISIBLE  // gradients are for photos
         setDrawMode(false)
         selectTarget()
         srcBmp = null; srcPx = null; outBmp = null; srcHist = null; outHist = null
@@ -1256,6 +1312,26 @@ class MainActivity : AppCompatActivity() {
         ui.postDelayed({ fullHint.visibility = View.GONE }, 3000)
     }
 
+    private var zoom = 1f
+
+    // Scales the full-screen picture around a focus point (in the box's coordinates) and moves it by (panX, panY).
+    private fun zoomBy(factor: Float, focusX: Float, focusY: Float, panX: Float, panY: Float) {
+        val z = (zoom * factor).coerceIn(1f, 8f)
+        val k = z / zoom
+        var tx = focusX - (focusX - fullImg.translationX) * k + panX
+        var ty = focusY - (focusY - fullImg.translationY) * k + panY
+        val w = rotBox.width.toFloat(); val h = rotBox.height.toFloat()
+        tx = tx.coerceIn(w - w * z, 0f); ty = ty.coerceIn(h - h * z, 0f)  // keep the picture on screen
+        zoom = z
+        fullImg.pivotX = 0f; fullImg.pivotY = 0f
+        fullImg.scaleX = z; fullImg.scaleY = z; fullImg.translationX = tx; fullImg.translationY = ty
+    }
+
+    private fun resetZoom() {
+        zoom = 1f
+        fullImg.scaleX = 1f; fullImg.scaleY = 1f; fullImg.translationX = 0f; fullImg.translationY = 0f
+    }
+
     // Turn the image 90° when its orientation doesn't match the screen's, so it fills the screen without rotating the app.
     private fun orientFull() {
         val w = fullRoot.width; val h = fullRoot.height; val b = srcBmp ?: return
@@ -1263,6 +1339,7 @@ class MainActivity : AppCompatActivity() {
         val rotate = (b.width > b.height) != (w > h) && b.width != b.height
         rotBox.layoutParams = FrameLayout.LayoutParams(if (rotate) h else w, if (rotate) w else h, Gravity.CENTER)
         rotBox.rotation = if (rotate) 90f else 0f
+        resetZoom()
     }
 
     // ---------- files & destinations ----------

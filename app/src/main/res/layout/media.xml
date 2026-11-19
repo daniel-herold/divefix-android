@@ -34,6 +34,8 @@
             <TextView android:id="@+id/drawHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:paddingVertical="8dp" android:textColor="@android:color/white" android:textAppearance="?attr/textAppearanceLabelLarge" />
         </LinearLayout>
+        <com.divefix.app.Histo android:id="@+id/histo" android:layout_width="@dimen/histo_w" android:layout_height="@dimen/histo_h"
+            android:layout_gravity="top|start" android:layout_margin="10dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/prev" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal" android:layout_width="wrap_content"
             android:layout_height="wrap_content" android:layout_gravity="start|center_vertical" android:layout_marginStart="4dp"
             android:alpha="0.85" android:contentDescription="Previous" app:icon="@drawable/ic_chevron_left" />
@@ -44,23 +46,30 @@
             android:background="@drawable/scrim_bottom" android:orientation="vertical" android:paddingHorizontal="8dp"
             android:paddingTop="32dp" android:paddingBottom="4dp">
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="bottom">
-                <com.divefix.app.Histo android:id="@+id/histo" android:layout_width="@dimen/histo_w" android:layout_height="@dimen/histo_h"
-                    android:layout_marginBottom="6dp" />
                 <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
                 <LinearLayout android:id="@+id/gradientGroup" android:layout_width="wrap_content" android:layout_height="wrap_content"
                     android:layout_marginEnd="4dp" android:gravity="center_vertical">
-                    <com.google.android.material.button.MaterialButton android:id="@+id/gradientBtn" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal"
+                    <com.google.android.material.button.MaterialButton android:id="@+id/gradLinear" style="@style/Widget.Material3.Button.IconButton.Filled"
                         android:layout_width="wrap_content" android:layout_height="wrap_content"
-                        android:contentDescription="Draw a gradient" app:icon="@drawable/ic_gradient" />
+                        android:contentDescription="Linear gradient" app:icon="@drawable/ic_gradient" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/gradIn" style="@style/Widget.Material3.Button.IconButton.Filled"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:contentDescription="Circle gradient, full effect in the centre" app:icon="@drawable/ic_grad_in" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/gradOut" style="@style/Widget.Material3.Button.IconButton.Filled"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:contentDescription="Circle gradient, full effect outside" app:icon="@drawable/ic_grad_out" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/gradientSave" style="@style/Widget.Material3.Button.IconButton"
                         android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone"
-                        android:contentDescription="Keep gradient" app:icon="@drawable/ic_check" />
+                        android:contentDescription="Done drawing, keep the gradient" app:icon="@drawable/ic_check" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/gradientDiscard" style="@style/Widget.Material3.Button.IconButton"
                         android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginEnd="2dp" android:visibility="gone"
-                        android:contentDescription="Discard gradient" app:icon="@drawable/ic_close" />
+                        android:contentDescription="Remove the gradient" app:icon="@drawable/ic_close" />
                 </LinearLayout>
                 <com.google.android.material.button.MaterialButton android:id="@+id/compare" style="@style/Widget.Material3.Button.TonalButton.Icon" android:layout_width="wrap_content"
                     android:layout_height="wrap_content" android:text="Hold to compare" app:icon="@drawable/ic_compare" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/compareIcon" style="@style/Widget.Material3.Button.IconButton.Filled.Tonal"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone"
+                    android:contentDescription="Hold to compare" app:icon="@drawable/ic_compare" />
             </LinearLayout>
             <LinearLayout android:id="@+id/videoRow" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:gravity="center_vertical" android:visibility="gone">
@@ -82,9 +91,9 @@
         android:textAppearance="?attr/textAppearanceLabelLarge" android:visibility="gone" />
     <com.google.android.material.button.MaterialButton android:id="@+id/gridCompare" style="@style/Widget.Material3.Button.TonalButton.Icon"
         android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="bottom|end"
-        android:layout_marginEnd="84dp" android:layout_marginBottom="22dp" android:elevation="6dp" android:stateListAnimator="@null"
+        android:layout_marginEnd="16dp" android:layout_marginBottom="22dp" android:elevation="6dp" android:stateListAnimator="@null"
         android:text="Hold to compare" android:visibility="gone" app:icon="@drawable/ic_compare" />
     <com.google.android.material.floatingactionbutton.FloatingActionButton android:id="@+id/addMore" android:layout_width="wrap_content"
-        android:layout_height="wrap_content" android:layout_gravity="bottom|end" android:layout_margin="16dp"
+        android:layout_height="wrap_content" android:layout_gravity="bottom|start" android:layout_margin="16dp"
         android:contentDescription="Add more photos and videos" android:visibility="gone" app:srcCompat="@drawable/ic_add" />
 </FrameLayout>
