@@ -30,10 +30,8 @@ import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
-import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -90,6 +88,10 @@ import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.view.ScaleGestureDetector
 import android.view.ViewConfiguration
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.materialswitch.MaterialSwitch
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.sqrt
@@ -145,7 +147,22 @@ class MainActivity : AppCompatActivity() {
     private val vals = arrayOfNulls<TextView>(n)
     private val dp by lazy { resources.displayMetrics.density }
     private var tablet = false
-    private var files = listOf<Uri>()
+    private var files = listOf<Uri>()  // everything added, in the order it was added
+    private var shown = listOf<Uri>()  // what the grid shows (filtered and sorted); the single view steps through this
+    private var items = listOf<Any>()  // grid rows: Dive headers and files
+    private var batch = listOf<Uri>()  // files being saved
+
+    /** What DiveFix knows about a file: capture time as camera wall-clock millis (or -1), video length, saved on the phone. */
+    class Meta(val name: String, val video: Boolean, val time: Long, val dur: Long, var phone: Boolean)
+    /** Files taken close together: a new dive starts after a 30 min break, or a 10 min break once a dive has lasted 100 min. */
+    class Dive(val n: Int, val start: Long, val end: Long, val all: List<Uri>) { var shownHere = listOf<Uri>() }
+    private val meta = ConcurrentHashMap<Uri, Meta>()
+    private val metaExec = Executors.newSingleThreadExecutor()
+    private var filter = 0  // 0 all, 1 raw (no saved copy), 2 saved, 3 individual
+    private var sort = 0  // 0 oldest first, 1 newest first, 2 name
+    private var groupDives = true
+    private var showTimes = false
+    private val wall = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC"); isLenient = false }
     private var cur = 0
     private var single = false
     private var holding = false
@@ -188,8 +205,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var root: View
     private lateinit var toolbar: MaterialToolbar
-    private lateinit var grid: GridView
-    private lateinit var adapter: BaseAdapter
+    private lateinit var grid: RecyclerView
+    private lateinit var gridLm: GridLayoutManager
+    private lateinit var adapter: RecyclerView.Adapter<RecyclerView.ViewHolder>
+    private lateinit var noMatch: TextView
     private lateinit var singleBox: FrameLayout
     private lateinit var surface: SurfaceView
     private lateinit var image: ImageView
@@ -266,9 +285,10 @@ class MainActivity : AppCompatActivity() {
                 2 -> chooseCard()
                 3 -> removeCurrent()
                 4 -> setFiles(listOf())
-                5 -> { selected.addAll(files); selectionChanged() }
+                5 -> { selected.addAll(shown); selectionChanged() }
                 6 -> removeSelected()
                 7 -> showHelp()
+                9 -> showSortSheet()
                 8 -> showAbout()
             }
             true
@@ -280,24 +300,39 @@ class MainActivity : AppCompatActivity() {
         gridCompare = findViewById(R.id.gridCompare)
 
         // ---------- grid ----------
-        adapter = object : BaseAdapter() {
-            override fun getCount() = files.size
-            override fun getItem(p: Int) = files[p]
-            override fun getItemId(p: Int) = p.toLong()
-            override fun getView(p: Int, convert: View?, parent: ViewGroup): View {
-                val cell = convert as? FrameLayout ?: makeCell()
-                cell.tag = files[p]
-                bindCell(cell, files[p])
-                return cell
+        adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount() = items.size
+            override fun getItemViewType(p: Int) = if (items[p] is Dive) 1 else 0
+            override fun onCreateViewHolder(parent: ViewGroup, type: Int): RecyclerView.ViewHolder {
+                val v = if (type == 1) GridViews.header(this@MainActivity).apply {
+                    (getChildAt(1) as View).setOnClickListener { (tag as? Dive)?.let { selectDive(it) } }
+                } else GridViews.cell(this@MainActivity).apply {
+                    val gap = (1 * dp).toInt()
+                    layoutParams = RecyclerView.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { setMargins(gap, gap, gap, gap) }
+                    setOnClickListener { (tag as? Uri)?.let { if (selecting) toggle(it) else { cur = shown.indexOf(it); enterSingle() } } }
+                    setOnLongClickListener { (tag as? Uri)?.let { toggle(it) }; true }
+                }
+                return object : RecyclerView.ViewHolder(v) {}
+            }
+            override fun onBindViewHolder(h: RecyclerView.ViewHolder, p: Int) {
+                when (val it = items[p]) {
+                    is Dive -> { h.itemView.tag = it; bindHeader(h.itemView as LinearLayout, it) }
+                    is Uri -> { h.itemView.tag = it; bindCell(h.itemView as FrameLayout, it) }
+                }
             }
         }
-        grid = findViewById<GridView>(R.id.grid).apply {
-            if (tablet) { numColumns = GridView.AUTO_FIT; columnWidth = (150 * dp).toInt() } else numColumns = 3
-            selector = GradientDrawable()  // no legacy highlight; cells have their own ripple
-            adapter = this@MainActivity.adapter
-            setOnItemClickListener { _, _, pos, _ -> if (selecting) toggle(files[pos]) else { cur = pos; enterSingle() } }
-            setOnItemLongClickListener { _, _, pos, _ -> toggle(files[pos]); true }
+        gridLm = GridLayoutManager(this, 3).apply {
+            spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() { override fun getSpanSize(p: Int) = if (items.getOrNull(p) is Dive) spanCount else 1 }
         }
+        grid = findViewById<RecyclerView>(R.id.grid).apply {
+            layoutManager = gridLm; adapter = this@MainActivity.adapter; itemAnimator = null
+            addOnLayoutChangeListener { _, l, _, r, _, _, _, _, _ ->  // tablets fit as many ~140 dp columns as there is room for
+                val spans = if (tablet) maxOf(3, ((r - l) / (140 * dp)).toInt()) else 3
+                if (spans != gridLm.spanCount) { gridLm.spanCount = spans; post { this@MainActivity.adapter.notifyDataSetChanged() } }
+            }
+        }
+        noMatch = findViewById(R.id.noMatch)
+        filter = 0; sort = prefs.getInt("sort", 0); groupDives = prefs.getBoolean("groupDives", true); showTimes = prefs.getBoolean("showTimes", false)
 
         // ---------- single view ----------
         singleBox = findViewById(R.id.single)
@@ -306,7 +341,7 @@ class MainActivity : AppCompatActivity() {
         originalTag = findViewById(R.id.originalTag)
         histo = findViewById(R.id.histo)
         overlay = findViewById<LineOverlay>(R.id.lineOverlay).apply {
-            onLine = { l -> adopt(); edits[files[cur]]?.line = l; render(); updateMode(); updateDrawBar() }
+            onLine = { l -> adopt(); edits[shown[cur]]?.line = l; render(); updateMode(); updateDrawBar() }
         }
         drawBar = findViewById(R.id.drawBar)
         drawHint = findViewById(R.id.drawHint)
@@ -316,10 +351,10 @@ class MainActivity : AppCompatActivity() {
         }
         gradientSave = findViewById<View>(R.id.gradientSave).apply { setOnClickListener { setDrawMode(false) } }
         gradientDiscard = findViewById<View>(R.id.gradientDiscard).apply {
-            setOnClickListener { edits[files[cur]]?.line = null; render(); updateMode(); setDrawMode(false) }
+            setOnClickListener { edits[shown[cur]]?.line = null; render(); updateMode(); setDrawMode(false) }
         }
-        prevBtn = findViewById<Button>(R.id.prev).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur - 1 + files.size) % files.size; loadPreview() } } }
-        nextBtn = findViewById<Button>(R.id.next).apply { setOnClickListener { if (files.isNotEmpty()) { cur = (cur + 1) % files.size; loadPreview() } } }
+        prevBtn = findViewById<Button>(R.id.prev).apply { setOnClickListener { if (shown.isNotEmpty()) { cur = (cur - 1 + shown.size) % shown.size; loadPreview() } } }
+        nextBtn = findViewById<Button>(R.id.next).apply { setOnClickListener { if (shown.isNotEmpty()) { cur = (cur + 1) % shown.size; loadPreview() } } }
         val compareTouch = View.OnTouchListener { view, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> { hold(true) }
@@ -503,7 +538,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        thread { openCard(false); runOnUiThread { adapter.notifyDataSetChanged(); refreshFileInfo() } }  // the camera may have been plugged in meanwhile
+        thread { openCard(false); runOnUiThread { if (!single) rebuild(); refreshFileInfo() } }  // the camera may have been plugged in meanwhile
     }
 
     override fun onPause() {
@@ -533,6 +568,7 @@ class MainActivity : AppCompatActivity() {
             "Gradients (photos)" to "Limit the correction to part of a photo. Line: full strength at ● fading to none at ○. Circles: drag from the centre outwards; one keeps the effect inside the circle, the other outside. You can start outside the photo. Only one gradient per photo: drawing a new one replaces it.",
             "Saving" to "Phone saves to DCIM/DiveFix, where your gallery shows it. Card saves to a DiveFix folder on the camera's card. Copies get _fix in the name, and correcting a file again replaces its earlier copy. Capture date and location are kept.",
             "Camera card" to "Set the camera to USB mode, connect it and add files with +. Don't unplug while saving. Originals and corrected copies on the same card are not a backup: copy them somewhere else too.",
+            "Dives, sorting and filters" to "Sorted by time, files are grouped into dives: a new dive starts after a break of 30 minutes, or 10 minutes once a dive has lasted 100 minutes. Times come from the file name (DJI), the photo's data or the file date. Tap Select on a dive to select all its files. The filter button shows only raw (not yet saved), saved or individually edited files. Correct saves what is shown, or just the selection.",
             "Kept only while the app is open" to "The list of files and all individual settings (✱, gradients) are temporary. Presets and the save location are remembered.",
             "Videos" to "Playback shows the correction live. Exporting takes a while: keep the screen on and the phone charging. HDR clips are saved as normal (SDR) video.",
         )
@@ -594,7 +630,7 @@ class MainActivity : AppCompatActivity() {
     // Replaces the selection (used for "Clear selection").
     private fun setFiles(list: List<Uri>) {
         if (running) { say("Wait for the current batch to finish first"); return }
-        files = listOf(); edits.clear(); selected.clear()
+        files = listOf(); edits.clear(); selected.clear(); meta.clear()
         addFiles(list)
     }
 
@@ -607,18 +643,21 @@ class MainActivity : AppCompatActivity() {
         val wasEmpty = files.isEmpty()
         files = files + added
         if (single) exitSingle()
-        updateCount()
+        rebuild()
         updateMode()
-        adapter.notifyDataSetChanged()
-        if (wasEmpty) grid.setSelection(0) else if (added.isNotEmpty()) grid.smoothScrollToPosition(files.size - 1)
+        if (wasEmpty) grid.scrollToPosition(0) else if (added.isNotEmpty()) items.indexOf(added.last()).takeIf { it >= 0 }?.let { grid.smoothScrollToPosition(it) }
+        scanMeta(added)
         if (added.size < list.size) say("${list.size - added.size} already selected, skipped")
     }
 
     private fun updateCount() {
-        go.text = if (files.isEmpty()) "Correct" else "Correct ${files.size}"
-        go.isEnabled = files.isNotEmpty() && !running
+        val target = if (selecting) selected.size else shown.size  // Correct saves what is shown, or just the selection
+        go.text = if (target == 0) "Correct" else "Correct $target"
+        go.isEnabled = target > 0 && !running
         emptyBox.visibility = if (files.isEmpty()) View.VISIBLE else View.GONE
-        grid.visibility = if (files.isEmpty()) View.GONE else View.VISIBLE
+        grid.visibility = if (shown.isEmpty()) View.GONE else View.VISIBLE
+        noMatch.visibility = if (files.isNotEmpty() && shown.isEmpty() && !single) View.VISIBLE else View.GONE
+        noMatch.text = "No ${listOf("", "raw", "saved", "individually edited")[filter]} files. Change the filter to see the others."
         addMore.visibility = if (files.isNotEmpty() && !single && !running && !selecting) View.VISIBLE else View.GONE
         gridCompare.visibility = if (files.isNotEmpty() && !single) View.VISIBLE else View.GONE
         updateToolbar()
@@ -642,10 +681,19 @@ class MainActivity : AppCompatActivity() {
             toolbar.navigationContentDescription = "End selection"
             toolbar.title = "${selected.size} selected"; toolbar.subtitle = null
             menu.add(0, 6, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-            if (selected.size < files.size) menu.add(0, 5, 0, "Select all")
+            if (selected.size < shown.size) menu.add(0, 5, 0, "Select all")
         } else {
             toolbar.navigationIcon = null
-            toolbar.title = "DiveFix"; toolbar.subtitle = if (files.isEmpty()) null else counts()
+            toolbar.title = "DiveFix"
+            toolbar.subtitle = if (files.isEmpty()) null else counts() + when {
+                files.any { !meta.containsKey(it) } -> " · reading dates…"
+                filter != 0 -> " · ${shown.size} ${listOf("", "raw", "saved", "individual")[filter]} shown"
+                else -> ""
+            }
+            if (files.isNotEmpty()) menu.add(0, 9, 0, "Sort and filter").apply {  // the icon lights up while a filter is on
+                setIcon(R.drawable.ic_filter); setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                icon?.mutate()?.setTint(MaterialColors.getColor(toolbar, if (filter != 0) com.google.android.material.R.attr.colorPrimary else com.google.android.material.R.attr.colorOnSurfaceVariant))
+            }
             if (files.isNotEmpty()) menu.add(0, 4, 2, "Clear selection")
         }
         menu.add(0, 2, 3, "Camera card folder…")
@@ -662,7 +710,7 @@ class MainActivity : AppCompatActivity() {
 
     // Points the sliders at what they now edit: the shown file's settings in the single view, the all-files settings in the grid.
     private fun selectTarget() {
-        val uri = files.getOrNull(cur)
+        val uri = shown.getOrNull(cur)
         v = when {
             single && uri != null -> edits[uri]?.v ?: g.copyOf()
             selecting -> settingsFor(selected.first()).copyOf()  // the sliders start from the first selected file
@@ -675,8 +723,8 @@ class MainActivity : AppCompatActivity() {
 
     // The first change in the single view makes the shown file individual; later changes in the grid leave it alone.
     private fun adopt() {
-        if (!single || files.isEmpty()) return
-        val uri = files[cur]
+        if (!single || shown.isEmpty()) return
+        val uri = shown[cur]
         if (!edits.containsKey(uri)) { edits[uri] = Edit(v); updateMode() }
     }
 
@@ -702,8 +750,8 @@ class MainActivity : AppCompatActivity() {
         selected.forEach { edits.remove(it) }
         selected.clear()
         cur = 0
+        rebuild()
         selectionChanged()
-        adapter.notifyDataSetChanged()
         say("$n removed from the list")
     }
 
@@ -724,7 +772,7 @@ class MainActivity : AppCompatActivity() {
             say("$n file${if (n == 1) "" else "s"} use the settings for all files again")
             return
         }
-        val uri = files.getOrNull(cur) ?: return
+        val uri = shown.getOrNull(cur) ?: return
         edits.remove(uri)
         overlay.line = null
         selectTarget()
@@ -734,7 +782,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateMode() {
-        val uri = files.getOrNull(cur)
+        val uri = shown.getOrNull(cur)
         val one = single && uri != null
         val e = if (one) edits[uri] else null
         val group = !single && selecting
@@ -781,7 +829,7 @@ class MainActivity : AppCompatActivity() {
         drawMode = on
         overlay.drawing = on
         overlay.kind = drawKind
-        overlay.line = edits[files.getOrNull(cur)]?.line
+        overlay.line = edits[shown.getOrNull(cur)]?.line
         drawBar.visibility = if (on) View.VISIBLE else View.GONE
         histo.visibility = if (on || player?.playWhenReady == true) View.GONE else View.VISIBLE  // the hint sits at the top while drawing
         findViewById<View>(R.id.prev).visibility = if (on) View.GONE else View.VISIBLE  // keep the edges free for drawing
@@ -794,7 +842,7 @@ class MainActivity : AppCompatActivity() {
     // Each tool is dark, or accent-filled when its gradient is applied to this photo. Pressing one opens drawing mode:
     // the tools join one pill with ✓ (done, keep) and ✕ (remove the gradient); the tool being drawn with is filled.
     private fun updateDrawBar() {
-        val applied = edits[files.getOrNull(cur)]?.line?.getOrElse(4) { 0f }?.toInt() ?: -1
+        val applied = edits[shown.getOrNull(cur)]?.line?.getOrElse(4) { 0f }?.toInt() ?: -1
         drawHint.text = when (drawKind) {
             0 -> "Drag a line: ● full effect → ○ none"
             1 -> "Drag from the centre: full inside, none at the circle"
@@ -836,17 +884,19 @@ class MainActivity : AppCompatActivity() {
         setDrawMode(false)
         showMode()
         selectTarget()
-        adapter.notifyDataSetChanged()
-        if (files.isNotEmpty()) grid.smoothScrollToPosition(cur)
+        val back = shown.getOrNull(cur)
+        rebuild()  // edits may have changed what the filter shows
+        back?.let { items.indexOf(it).takeIf { p -> p >= 0 }?.let { p -> grid.scrollToPosition(p) } }
     }
 
     private fun removeCurrent() {
-        if (running || files.isEmpty()) return
-        edits.remove(files[cur])
-        files = files.filterIndexed { k, _ -> k != cur }
-        cur = cur.coerceAtMost(files.size - 1).coerceAtLeast(0)
-        adapter.notifyDataSetChanged()
-        if (files.isEmpty()) exitSingle() else { updateCount(); loadPreview() }
+        if (running || shown.isEmpty()) return
+        val gone = shown[cur]
+        edits.remove(gone)
+        files = files - gone
+        shown = shown - gone; rebuild(keepOrder = true)
+        cur = cur.coerceAtMost(shown.size - 1).coerceAtLeast(0)
+        if (shown.isEmpty()) exitSingle() else { updateCount(); loadPreview() }
     }
 
     // ---------- sliders & presets ----------
@@ -1026,7 +1076,7 @@ class MainActivity : AppCompatActivity() {
         if (!single) { renderThumbs((0 until grid.childCount).mapNotNull { grid.getChildAt(it).tag as? Uri }, seq); return }
         val px = srcPx ?: return
         val src = srcBmp ?: return
-        val s = v.copyOf(); val line = edits[files.getOrNull(cur)]?.line?.copyOf()
+        val s = v.copyOf(); val line = edits[shown.getOrNull(cur)]?.line?.copyOf()
         renderer.execute {
             if (seq != renderSeq) return@execute
             val out = correct(px, src.width, src.height, s, line)
@@ -1064,43 +1114,26 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- grid thumbnails ----------
 
-    private fun makeCell(): FrameLayout {
-        val icon = { res: Int -> ImageView(this).apply { setImageResource(res); imageTintList = ColorStateList.valueOf(Color.WHITE) } }
-        val small = (14 * dp).toInt()
-        val ripple = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).run { val d = getDrawable(0); recycle(); d }
-        return object : FrameLayout(this) {
-            override fun onMeasure(w: Int, h: Int) = super.onMeasure(w, w)
-        }.apply {
-            setBackgroundColor(0xFF1D2021.toInt()); foreground = ripple
-            addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-            addView(LinearLayout(context).apply {  // where a fixed copy exists: phone and/or card
-                setBackgroundResource(R.drawable.pill); setPadding((5 * dp).toInt(), (3 * dp).toInt(), (5 * dp).toInt(), (3 * dp).toInt())
-                addView(icon(R.drawable.ic_phone), LinearLayout.LayoutParams(small, small))
-                addView(icon(R.drawable.ic_sd), LinearLayout.LayoutParams(small, small).apply { marginStart = (2 * dp).toInt() })
-            }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
-            addView(LinearLayout(context).apply {  // video length
-                gravity = Gravity.CENTER_VERTICAL; setBackgroundResource(R.drawable.scrim_bottom)
-                setPadding((6 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
-                addView(icon(R.drawable.ic_play), LinearLayout.LayoutParams(small, small))
-                addView(TextView(context).apply {
-                    setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall); setTextColor(Color.WHITE)
-                    fontFeatureSettings = "tnum"; setPadding((3 * dp).toInt(), 0, 0, 0)
-                })
-            }, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
-            addView(FrameLayout(context).apply {  // ✱ individually edited
-                setBackgroundResource(R.drawable.pill); setPadding((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
-                addView(icon(R.drawable.ic_asterisk), FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt()))
-            }, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.START).apply { setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, 0) })
-            val primary = MaterialColors.getColor(this@MainActivity, com.google.android.material.R.attr.colorPrimary, Color.CYAN)
-            addView(FrameLayout(context).apply {  // selected: tinted with a frame and a check
-                background = GradientDrawable().apply { setColor((primary and 0x00FFFFFF) or 0x40000000); setStroke((3 * dp).toInt(), primary) }
-                addView(ImageView(context).apply {
-                    setImageResource(R.drawable.ic_check); setPadding((3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt())
-                    imageTintList = ColorStateList.valueOf(MaterialColors.getColor(this@MainActivity, com.google.android.material.R.attr.colorOnPrimary, Color.BLACK))
-                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(primary) }
-                }, FrameLayout.LayoutParams((22 * dp).toInt(), (22 * dp).toInt(), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, (6 * dp).toInt(), (6 * dp).toInt()) })
-            }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        }
+    private fun timeLabel(uri: Uri) = if (showTimes) meta[uri]?.time?.takeIf { it >= 0 }?.let { clock.format(it) } else null
+    private val clock = SimpleDateFormat("HH:mm", Locale.getDefault()).apply { timeZone = TimeZone.getTimeZone("UTC") }
+
+    private fun bindHeader(h: LinearLayout, d: Dive) {
+        val day = SimpleDateFormat("EEE d MMM", Locale.getDefault()).apply { timeZone = TimeZone.getTimeZone("UTC") }
+        val videos = d.all.count { meta[it]?.video == true }; val photos = d.all.size - videos
+        val parts = mutableListOf<String>()
+        if (d.n > 0) parts += "${day.format(d.start)} · ${clock.format(d.start)}–${clock.format(d.end)}"
+        parts += "$photos photo${if (photos == 1) "" else "s"}" + if (videos > 0) " · $videos video${if (videos == 1) "" else "s"}" else ""
+        if (d.shownHere.size < d.all.size) parts += "${d.shownHere.size} shown"
+        GridViews.bindHeader(h, if (d.n > 0) "Dive ${d.n}" else "Unknown time", parts.joinToString(" · "),
+            if (d.shownHere.isNotEmpty() && selected.containsAll(d.shownHere)) "Deselect" else "Select")
+    }
+
+    // Select (or deselect) every shown file of one dive, e.g. to edit or save just that dive.
+    private fun selectDive(d: Dive) {
+        if (running) return
+        if (selected.containsAll(d.shownHere)) selected.removeAll(d.shownHere.toSet()) else selected.addAll(d.shownHere)
+        selectionChanged()
+        adapter.notifyDataSetChanged()
     }
 
     private fun cellFor(uri: Uri) = (0 until grid.childCount).map { grid.getChildAt(it) }.firstOrNull { it.tag == uri } as? FrameLayout
@@ -1108,12 +1141,11 @@ class MainActivity : AppCompatActivity() {
     private fun bindCell(cell: FrameLayout, uri: Uri) {
         val img = cell.getChildAt(0) as ImageView
         val where = cell.getChildAt(1) as LinearLayout
-        val vid = cell.getChildAt(2) as LinearLayout
         cell.getChildAt(3).visibility = if (edits.containsKey(uri)) View.VISIBLE else View.GONE
         cell.getChildAt(4).visibility = if (uri in selected) View.VISIBLE else View.GONE
         val t = thumbs.get(uri)
         if (t == null) {
-            img.setImageBitmap(null); where.visibility = View.GONE; vid.visibility = View.GONE
+            img.setImageBitmap(null); where.visibility = View.GONE; GridViews.bindBottom(cell, null, timeLabel(uri))
             if (loading.add(uri)) {
                 val s = settingsFor(uri).copyOf(); val line = edits[uri]?.line?.copyOf(); val key = keyFor(uri)
                 thumbLoader.execute {
@@ -1128,8 +1160,7 @@ class MainActivity : AppCompatActivity() {
         where.visibility = if (t.phone || card) View.VISIBLE else View.GONE
         where.getChildAt(0).visibility = if (t.phone) View.VISIBLE else View.GONE
         where.getChildAt(1).visibility = if (card) View.VISIBLE else View.GONE
-        vid.visibility = if (t.dur >= 0) View.VISIBLE else View.GONE
-        (vid.getChildAt(1) as TextView).text = "%d:%02d".format(t.dur / 60000, t.dur / 1000 % 60)
+        GridViews.bindBottom(cell, if (t.dur >= 0) "%d:%02d".format(t.dur / 60000, t.dur / 1000 % 60) else null, timeLabel(uri))
         if (t.key != keyFor(uri)) renderThumbs(listOf(uri), renderSeq)
     }
 
@@ -1173,16 +1204,16 @@ class MainActivity : AppCompatActivity() {
     // ---------- single view: photo or video frame ----------
 
     private fun loadPreview() {
-        if (files.isEmpty()) return
+        if (shown.isEmpty()) return
         releasePlayer()
-        val uri = files[cur]
+        val uri = shown[cur]
         val video = isVideo(uri)
         val fs = ++fileSeq
         val seq = ++frameSeq
-        fileTitle = nameOf(uri); fileSub = "${cur + 1} of ${files.size}"
+        fileTitle = nameOf(uri); fileSub = "${cur + 1} of ${shown.size}"
         updateToolbar()
         refreshFileInfo()
-        prevBtn.visibility = if (files.size > 1) View.VISIBLE else View.GONE
+        prevBtn.visibility = if (shown.size > 1) View.VISIBLE else View.GONE
         nextBtn.visibility = prevBtn.visibility
         videoRow.visibility = if (video) View.VISIBLE else View.GONE
         gradientGroup.visibility = if (video) View.GONE else View.VISIBLE  // gradients are for photos
@@ -1266,7 +1297,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) pause() }
                 override fun onPlayerError(error: PlaybackException) { say("Can't play this video (${error.errorCodeName})"); releasePlayer(); loadFrame(true) }
             })
-            p.setMediaItem(MediaItem.fromUri(files[cur]), videoPos)
+            p.setMediaItem(MediaItem.fromUri(shown[cur]), videoPos)
             p.prepare()
             if (holding) applyFx.run()
             p.play()
@@ -1351,6 +1382,114 @@ class MainActivity : AppCompatActivity() {
 
     private fun outName(uri: Uri, video: Boolean) = nameOf(uri).substringBeforeLast('.') + "_fix" + if (video) ".mp4" else ".jpg"
 
+    // Reads names, capture times, video lengths and saved state in the background, then regroups the grid.
+    private fun scanMeta(list: List<Uri>) = metaExec.execute {
+        for (u in list) {
+            if (meta.containsKey(u)) continue
+            val name = nameOf(u); val video = isVideo(u)
+            val dur = if (!video) -1L else runCatching {
+                MediaMetadataRetriever().run { setDataSource(this@MainActivity, u); val d = extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong(); release(); d }
+            }.getOrDefault(0L)
+            val phone = runCatching { existing(name.substringBeforeLast('.') + "_fix" + if (video) ".mp4" else ".jpg", video) != null }.getOrDefault(false)
+            meta[u] = Meta(name, video, captureTime(u, name, video), dur, phone)
+        }
+        runOnUiThread { if (!single) rebuild() }
+    }
+
+    // Capture time as camera wall-clock millis (formatted in UTC, so photos and videos line up). DJI and most phones put it in the
+    // file name; otherwise the photo's EXIF, the video's metadata or the file date is used.
+    private fun captureTime(u: Uri, name: String, video: Boolean): Long {
+        Regex("(20\\d{6})[_-]?(\\d{6})").find(name)?.let { m -> runCatching { return wall.parse(m.groupValues[1] + m.groupValues[2])!!.time } }
+        val local = { t: Long -> t + TimeZone.getDefault().getOffset(t) }
+        if (!video) runCatching {
+            val exif = contentResolver.openInputStream(u)!!.use { ExifInterface(it) }.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)!!
+            return SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.parse(exif)!!.time
+        }
+        if (video) runCatching {
+            val d = MediaMetadataRetriever().run { setDataSource(this@MainActivity, u); val x = extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE); release(); x!! }
+            val t = SimpleDateFormat("yyyyMMdd'T'HHmmss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.parse(d)!!.time
+            if (t > 0) return local(t)
+        }
+        return runCatching {
+            contentResolver.query(u, arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)!!.use { c -> c.moveToFirst(); c.getLong(0) }.takeIf { it > 0 }!!.let(local)
+        }.getOrDefault(-1L)
+    }
+
+    // Recomputes dives, the filtered and sorted list, and the grid rows.
+    private fun rebuild(keepOrder: Boolean = false) {
+        val time = { u: Uri -> meta[u]?.time ?: -1L }
+        val dives = mutableListOf<Dive>(); val diveOf = HashMap<Uri, Dive>()
+        var group = mutableListOf<Uri>(); var start = 0L; var end = 0L
+        val close = { if (group.isNotEmpty()) dives += Dive(dives.size + 1, start, end, group) }
+        for (u in files.filter { time(it) >= 0 }.sortedBy(time)) {
+            val t = time(u)
+            if (group.isEmpty() || t - end >= 30 * 60_000L || (t - start >= 100 * 60_000L && t - end >= 10 * 60_000L)) { close(); group = mutableListOf(); start = t; end = t }
+            group += u; end = maxOf(end, t + maxOf(0L, meta[u]?.dur ?: 0L))
+        }
+        close()
+        dives.forEach { d -> d.all.forEach { diveOf[it] = d } }
+        val unknown = files.filter { time(it) < 0 }.let { if (it.isEmpty()) null else Dive(0, 0, 0, it) }
+        unknown?.all?.forEach { diveOf[it] = unknown }
+
+        val saved = { u: Uri -> meta[u]?.phone == true || meta[u]?.let { cardFiles.containsKey(outName(u, it.video)) } == true }
+        val pass = { u: Uri -> when (filter) { 1 -> !saved(u); 2 -> saved(u); 3 -> edits.containsKey(u); else -> true } }
+        if (!keepOrder) shown = when (sort) {
+            2 -> files.filter(pass).sortedBy { meta[it]?.name?.lowercase() ?: "" }
+            else -> files.filter(pass).sortedWith(compareBy<Uri>({ time(it) < 0 }, { if (sort == 1) -time(it) else time(it) }))
+        }
+        selected.retainAll(shown.toSet())
+        val grouped = groupDives && sort != 2 && files.all { meta.containsKey(it) }  // group once every date is known
+        items = if (!grouped) shown else buildList {
+            val order = if (sort == 1) dives.reversed() else dives
+            for (d in order + listOfNotNull(unknown)) {
+                d.shownHere = shown.filter { diveOf[it] === d }
+                if (d.shownHere.isNotEmpty()) { add(d); addAll(d.shownHere) }
+            }
+        }
+        if (grouped) shown = items.filterIsInstance<Uri>()
+        adapter.notifyDataSetChanged()
+        updateCount()
+    }
+
+    private fun showSortSheet() {
+        val sheet = BottomSheetDialog(this)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), (24 * dp).toInt()) }
+        val heading = { t: String -> TextView(this).apply {
+            text = t; setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall); setPadding(0, (16 * dp).toInt(), 0, (4 * dp).toInt())
+        } }
+        val chipRow = { labels: List<String>, checked: Int, pick: (Int) -> Unit -> ChipGroup(this).apply {
+            isSingleSelection = true; isSelectionRequired = true
+            labels.forEachIndexed { k, l ->
+                val c = layoutInflater.inflate(R.layout.chip_preset, this, false) as Chip
+                c.text = l; c.id = View.generateViewId(); addView(c); if (k == checked) c.isChecked = true
+                c.setOnCheckedChangeListener { _, on -> if (on) pick(k) }
+            }
+        } }
+        lateinit var groupSwitch: MaterialSwitch
+        box.addView(heading("Show"))
+        box.addView(chipRow(listOf("All", "Raw", "Saved", "Individual ✱"), filter) { filter = it; selected.clear(); rebuild(); selectionChanged() })
+        box.addView(TextView(this).apply {
+            text = "Raw: no corrected copy yet · Saved: corrected copy on phone or card"
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+            setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+        })
+        box.addView(heading("Sort"))
+        box.addView(chipRow(listOf("Oldest first", "Newest first", "Name"), sort) {
+            sort = it; prefs.edit().putInt("sort", it).apply(); groupSwitch.isEnabled = it != 2; rebuild(); grid.scrollToPosition(0)
+        })
+        groupSwitch = MaterialSwitch(this).apply {
+            text = "Group by dive"; isChecked = groupDives; isEnabled = sort != 2
+            setOnCheckedChangeListener { _, on -> groupDives = on; prefs.edit().putBoolean("groupDives", on).apply(); rebuild() }
+        }
+        box.addView(groupSwitch, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = (12 * dp).toInt() })
+        box.addView(MaterialSwitch(this).apply {
+            text = "Show capture time on thumbnails"; isChecked = showTimes
+            setOnCheckedChangeListener { _, on -> showTimes = on; prefs.edit().putBoolean("showTimes", on).apply(); adapter.notifyDataSetChanged() }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        sheet.setContentView(box)
+        sheet.show()
+    }
+
     // Our earlier output for this file in DCIM/DiveFix, if any (only files DiveFix created are visible to it).
     private fun existing(fileName: String, video: Boolean): Uri? {
         val col = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -1363,8 +1502,8 @@ class MainActivity : AppCompatActivity() {
 
     // Toolbar subtitle in the single view: position plus where a fixed copy already exists.
     private fun refreshFileInfo() {
-        if (files.isEmpty() || !single) return
-        val uri = files[cur]
+        if (shown.isEmpty() || !single) return
+        val uri = shown[cur]
         val fs = fileSeq
         thread {
             val video = isVideo(uri)
@@ -1372,7 +1511,7 @@ class MainActivity : AppCompatActivity() {
             val phone = runCatching { existing(name, video) != null }.getOrDefault(false)
             val card = cardFiles.containsKey(name)
             val where = when { phone && card -> " · fixed on phone and card"; phone -> " · fixed on phone"; card -> " · fixed on card"; else -> "" }
-            runOnUiThread { if (fs == fileSeq) { fileSub = "${cur + 1} of ${files.size}$where"; toolbar.subtitle = fileSub } }
+            runOnUiThread { if (fs == fileSeq) { fileSub = "${cur + 1} of ${shown.size}$where"; toolbar.subtitle = fileSub } }
         }
     }
 
@@ -1395,7 +1534,7 @@ class MainActivity : AppCompatActivity() {
             val ok = openCard(true)
             runOnUiThread {
                 say(if (ok) "Camera card ready. Fixed files go to its DiveFix folder." else "DiveFix can't write to that folder")
-                adapter.notifyDataSetChanged(); refreshFileInfo()
+                if (!single) rebuild(); refreshFileInfo()
             }
         }
     }
@@ -1458,7 +1597,8 @@ class MainActivity : AppCompatActivity() {
         releasePlayer()
         running = true; cancelled = false; saved = 0; failed = 0; lastError = null; batchDest = dest
         destGroup.isEnabled = false; updateCount()
-        val plan = files.map { settingsFor(it).copyOf() to edits[it]?.line?.copyOf() }  // each file with its own settings
+        batch = if (selecting) shown.filter { it in selected } else shown
+        val plan = batch.map { settingsFor(it).copyOf() to edits[it]?.line?.copyOf() }  // each file with its own settings
         thread {
             val ok = batchDest == 0 || openCard(true)
             runOnUiThread {
@@ -1488,19 +1628,20 @@ class MainActivity : AppCompatActivity() {
         val snap = thumbs.snapshot()  // refresh the location marks in the grid
         thread {
             snap.forEach { (_, t) -> t.phone = runCatching { existing(t.outName, t.dur >= 0) != null }.getOrDefault(t.phone) }
-            runOnUiThread { adapter.notifyDataSetChanged() }
+            meta.forEach { (u, m) -> m.phone = runCatching { existing(outName(u, m.video), m.video) != null }.getOrDefault(m.phone) }
+            runOnUiThread { rebuild() }
         }
     }
 
     private fun process(i: Int, plan: List<Pair<FloatArray, FloatArray?>>) {
         if (!running) return
-        if (cancelled || i >= files.size) { finishBatch(); return }
+        if (cancelled || i >= batch.size) { finishBatch(); return }
         val m = matrix(plan[i].first); val pop = plan[i].first[6] / 100f
-        val uri = files[i]
+        val uri = batch[i]
         val name = nameOf(uri)
         val base = name.substringBeforeLast('.') + "_fix"
-        runText.text = "${i + 1} of ${files.size} · $name"
-        progress.setProgressCompat(i * 1000 / files.size, true)
+        runText.text = "${i + 1} of ${batch.size} · $name"
+        progress.setProgressCompat(i * 1000 / batch.size, true)
 
         if (!isVideo(uri)) {
             thread {
@@ -1580,8 +1721,8 @@ class MainActivity : AppCompatActivity() {
             override fun run() {
                 if (!running || transformer !== t) return
                 if (t.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE) {
-                    progress.setProgressCompat((i * 1000 + holder.progress * 10) / files.size, true)
-                    runText.text = "${i + 1} of ${files.size} · $name · ${holder.progress}%"
+                    progress.setProgressCompat((i * 1000 + holder.progress * 10) / batch.size, true)
+                    runText.text = "${i + 1} of ${batch.size} · $name · ${holder.progress}%"
                 }
                 ui.postDelayed(this, 500)
             }

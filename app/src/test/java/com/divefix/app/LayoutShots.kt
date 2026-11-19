@@ -8,9 +8,7 @@ import android.graphics.Paint
 import android.graphics.Shader
 import android.view.Gravity
 import android.view.View
-import android.widget.BaseAdapter
 import android.widget.FrameLayout
-import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -39,41 +37,32 @@ class LayoutShots {
         val ctx = root.context; val dp = ctx.resources.displayMetrics.density
         root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
             if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.JPG"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
-            else { title = "DiveFix"; subtitle = "18 photos · 4 videos" }
+            else { title = "DiveFix"; subtitle = "18 photos · 4 videos"; menu.add("Sort and filter").setIcon(R.drawable.ic_filter).setShowAsAction(2) }
             menu.add("Camera card folder…")
         }
-        val grid = root.findViewById<GridView>(R.id.grid)
-        grid.numColumns = columns
-        grid.adapter = object : BaseAdapter() {
-            override fun getCount() = 24
-            override fun getItem(p: Int) = p
-            override fun getItemId(p: Int) = p.toLong()
-            override fun getView(p: Int, c: View?, parent: android.view.ViewGroup) = object : FrameLayout(ctx) {
-                override fun onMeasure(w: Int, h: Int) = super.onMeasure(w, w)
-            }.apply {
-                addView(ImageView(ctx).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setImageBitmap(fake(300, 300, p)) })
-                if (p % 3 == 0) addView(LinearLayout(ctx).apply {
-                    setBackgroundResource(R.drawable.pill); setPadding((5 * dp).toInt(), (3 * dp).toInt(), (5 * dp).toInt(), (3 * dp).toInt())
-                    addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_phone); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
-                    if (p % 2 == 0) addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_sd); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
-                }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, (4 * dp).toInt(), (4 * dp).toInt(), 0) })
-                if (p == 2 || p == 7) addView(FrameLayout(ctx).apply {
-                    setBackgroundResource(R.drawable.pill); setPadding((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
-                    addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_asterisk) }, FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt()))
-                }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { setMargins((4 * dp).toInt(), (4 * dp).toInt(), 0, 0) })
-                if (p in sel) addView(FrameLayout(ctx).apply {
-                    background = android.graphics.drawable.GradientDrawable().apply { setColor(0x406CCFDD); setStroke((3 * dp).toInt(), 0xFF6CCFDD.toInt()) }
-                    addView(ImageView(ctx).apply {
-                        setImageResource(R.drawable.ic_check); setPadding((3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt(), (3 * dp).toInt())
-                        imageTintList = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
-                        background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(0xFF6CCFDD.toInt()) }
-                    }, FrameLayout.LayoutParams((22 * dp).toInt(), (22 * dp).toInt(), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, (6 * dp).toInt(), (6 * dp).toInt()) })
-                }, FrameLayout.LayoutParams(-1, -1))
-                if (p == 1 || p == 5) addView(LinearLayout(ctx).apply {
-                    gravity = Gravity.CENTER_VERTICAL; setBackgroundResource(R.drawable.scrim_bottom); setPadding((6 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
-                    addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_play); imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE) }, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()))
-                    addView(TextView(ctx).apply { text = "0:42"; setTextColor(Color.WHITE); setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall); setTextColor(Color.WHITE) })
-                }, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        val grid = root.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.grid)
+        // rows: header, files, header, files (like two dives)
+        val rows: List<Any> = listOf("Dive 1|Sat 2 Nov · 10:12–11:04 · 9 photos · 2 videos") + (0 until 11) + listOf("Dive 2|Sat 2 Nov · 12:31–13:18 · 13 photos") + (11 until 24)
+        val lm = androidx.recyclerview.widget.GridLayoutManager(ctx, columns)
+        lm.spanSizeLookup = object : androidx.recyclerview.widget.GridLayoutManager.SpanSizeLookup() { override fun getSpanSize(p: Int) = if (rows[p] is String) lm.spanCount else 1 }
+        grid.layoutManager = lm
+        grid.adapter = object : androidx.recyclerview.widget.RecyclerView.Adapter<androidx.recyclerview.widget.RecyclerView.ViewHolder>() {
+            override fun getItemCount() = rows.size
+            override fun getItemViewType(p: Int) = if (rows[p] is String) 1 else 0
+            override fun onCreateViewHolder(parent: android.view.ViewGroup, type: Int) = object : androidx.recyclerview.widget.RecyclerView.ViewHolder(
+                if (type == 1) GridViews.header(ctx) else GridViews.cell(ctx).apply {
+                    layoutParams = androidx.recyclerview.widget.RecyclerView.LayoutParams(-1, -2).apply { setMargins((1 * dp).toInt(), (1 * dp).toInt(), (1 * dp).toInt(), (1 * dp).toInt()) }
+                }) {}
+            override fun onBindViewHolder(h: androidx.recyclerview.widget.RecyclerView.ViewHolder, pos: Int) {
+                val r = rows[pos]
+                if (r is String) { val (t, d) = r.split("|"); GridViews.bindHeader(h.itemView as LinearLayout, t, d, if (sel.isNotEmpty() && t == "Dive 1") "Deselect" else "Select"); return }
+                val p = r as Int; val cell = h.itemView as FrameLayout
+                (cell.getChildAt(0) as ImageView).setImageBitmap(fake(300, 300, p))
+                val where = cell.getChildAt(1) as LinearLayout
+                where.visibility = if (p % 3 == 0) View.VISIBLE else View.GONE; where.getChildAt(1).visibility = if (p % 2 == 0) View.VISIBLE else View.GONE
+                GridViews.bindBottom(cell, if (p == 1 || p == 5) "0:42" else null, "%02d:%02d".format(10 + p / 11, (12 + p * 4) % 60))
+                cell.getChildAt(3).visibility = if (p == 2 || p == 7) View.VISIBLE else View.GONE
+                cell.getChildAt(4).visibility = if (p in sel) View.VISIBLE else View.GONE
             }
         }
         root.findViewById<View>(R.id.empty).visibility = View.GONE
@@ -165,8 +154,7 @@ class LayoutShots {
     @Test fun tablet() {
         paparazzi.unsafeUpdateConfig(deviceConfig = DeviceConfig.PIXEL_C)
         val root = paparazzi.inflate<View>(R.layout.activity_main)
-        root.findViewById<GridView>(R.id.grid).apply { numColumns = GridView.AUTO_FIT; columnWidth = (150 * root.resources.displayMetrics.density).toInt() }
-        fill(root, false, GridView.AUTO_FIT)
+        fill(root, false, 6)
         paparazzi.snapshot(root)
     }
 
@@ -179,7 +167,7 @@ class LayoutShots {
     @Test fun selection() {
         val root = paparazzi.inflate<View>(R.layout.activity_main)
         root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
-        fill(root, false, sel = setOf(1, 3, 4)); paparazzi.snapshot(root)
+        fill(root, false, sel = setOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)); paparazzi.snapshot(root)
     }
 
     @Test fun singleCircle() {
