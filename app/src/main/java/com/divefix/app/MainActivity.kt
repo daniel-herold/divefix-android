@@ -92,7 +92,9 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.materialswitch.MaterialSwitch
+import android.graphics.Canvas
 import android.graphics.ColorMatrix
+import android.graphics.Paint
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import androidx.media3.effect.ScaleAndRotateTransformation
@@ -150,15 +152,23 @@ class MainActivity : AppCompatActivity() {
     private val selected = LinkedHashSet<Uri>()  // marked for export (colour in the grid); the others are just included (grey)
     private var editSelected = false  // grid: sliders change only the selected files
 
-    /** Per-file geometry: quarter turns clockwise, crop (l, t, r, b in 0..1 of the turned picture), video trim in ms (-1 = none). */
-    class Geo(var rot: Int = 0, var crop: FloatArray? = null, var trimStart: Long = -1, var trimEnd: Long = -1) {
-        val isSet get() = rot != 0 || crop != null || trimStart >= 0 || trimEnd >= 0
-        fun copy() = Geo(rot, crop?.copyOf(), trimStart, trimEnd)
+    /**
+     * Per-file geometry: quarter turns clockwise, a freehand angle (degrees clockwise, photos), the crop (l, t, r, b in 0..1
+     * of the turned and straightened picture, which keeps the turned picture's frame) and video trim in ms (-1 = none).
+     */
+    class Geo(var rot: Int = 0, var crop: FloatArray? = null, var trimStart: Long = -1, var trimEnd: Long = -1, var angle: Float = 0f) {
+        val isSet get() = rot != 0 || crop != null || trimStart >= 0 || trimEnd >= 0 || angle != 0f
+        fun copy() = Geo(rot, crop?.copyOf(), trimStart, trimEnd, angle)
     }
     private val geos = HashMap<Uri, Geo>()
     private var geoMode = false
     private var videoFps = 30f
     private var baseBmp: Bitmap? = null  // decoded picture or frame before turning
+    private var turnedBmp: Bitmap? = null  // turned by quarter turns only: "original" for comparing
+    private var turnedHist: Array<IntArray>? = null
+    private var srcAngle = 0f  // the freehand angle srcBmp was made with
+    private var pendingAngle = 0f  // angle while the crop tool is open (kept with ✓)
+    private var cropBeforeAngle: FloatArray? = null
     private val grey = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
     private val exifClock = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
     private val sliders = arrayOfNulls<Slider>(n)
@@ -233,6 +243,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var trimRow: View
     private lateinit var trimSlider: RangeSlider
     private lateinit var trimTime: TextView
+    private lateinit var angleRow: View
+    private lateinit var angleSlider: Slider
+    private lateinit var angleText: TextView
     private lateinit var selectBtn: MaterialButton
     private lateinit var modeSwitch: MaterialButton
     private lateinit var singleBox: FrameLayout
@@ -413,6 +426,16 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.geoRotate).setOnClickListener { turnCurrent() }
         findViewById<View>(R.id.geoSave).setOnClickListener { commitGeo() }
         findViewById<View>(R.id.geoDiscard).setOnClickListener { resetGeo() }
+        angleRow = findViewById(R.id.angleRow)
+        angleText = findViewById<TextView>(R.id.angleText).apply { setOnClickListener { setAngle(0f); angleSlider.value = 0f } }
+        angleSlider = findViewById<Slider>(R.id.angleSlider).apply {
+            trackActiveTintList = trackInactiveTintList  // centred control: no fill from the left end
+            addOnChangeListener { _, value, fromUser -> if (fromUser) setAngle(value) }
+            addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                override fun onStartTrackingTouch(slider: Slider) {}
+                override fun onStopTrackingTouch(slider: Slider) { cropBeforeAngle = null }
+            })
+        }
         trimSlider = findViewById<RangeSlider>(R.id.trimSlider).apply {
             addOnChangeListener { sl, _, fromUser ->  // the dragged end shows its frame
                 if (!fromUser) return@addOnChangeListener
@@ -620,7 +643,7 @@ class MainActivity : AppCompatActivity() {
             "What DiveFix does" to "Water swallows red light first, so dive photos and videos turn blue-green. DiveFix brings the colours back with a few simple settings and saves corrected copies. Your originals are never changed, and everything runs offline on your phone.",
             "Your set and what gets saved" to "Everything you add is in your set and shown in the grid. Selected files are in colour, the others grey. Long-press a thumbnail, or use Select in the single view, to switch. Correct saves the selected files the grid shows; in the single view it saves just that file.",
             "All files or individual" to "In the grid, the settings apply to all files (or only to the selected ones with Edit selected). In the single view, changes apply only to that file: it becomes individual (✱) and later grid changes skip it. Reset returns it to the settings for all files.",
-            "Crop, trim and rotate" to "Use the crop (photos) or scissors (videos) button at the top of the single view. Drag the frame or the trim ends, ↻ turns by 90°, ✓ keeps, ✕ undoes. These only affect the saved copy.",
+            "Crop, trim and rotate" to "Use the crop (photos) or scissors (videos) button at the top of the single view. Drag the frame or the trim ends, Angle straightens a photo freely (the crop shrinks so no empty corners show), ↻ turns by 90°, ✓ keeps, ✕ undoes. Hold to compare shows the original framing. Any change in the single view selects the file.",
             "Photos from videos" to "Pause a video, step frame by frame with the arrow buttons and tap the camera to save that frame as a new photo in DCIM/DiveFix/Frames. It keeps the video's time, is added to your set as selected and can be corrected like any photo.",
             "Presets" to "Shallow, Medium and Deep are starting points for typical depths. Save your own with + Save preset; long-press a preset to update, rename or delete it.",
             "Gradients (photos)" to "Limit the correction to part of a photo. Line: full strength at ● fading to none at ○. Circles: drag from the centre outwards; one keeps the effect inside the circle, the other outside. You can start outside the photo. Only one gradient per photo: drawing a new one replaces it.",
@@ -793,6 +816,7 @@ class MainActivity : AppCompatActivity() {
     private fun adopt() {
         if (!single || shown.isEmpty()) return
         val uri = shown[cur]
+        autoSelect()
         if (!edits.containsKey(uri)) { edits[uri] = Edit(v); updateMode() }
     }
 
@@ -803,6 +827,12 @@ class MainActivity : AppCompatActivity() {
             drawMode -> setDrawMode(false)
             single -> exitSingle()
         }
+    }
+
+    // Editing a file in the single view selects it for export.
+    private fun autoSelect() {
+        val uri = shown.getOrNull(cur) ?: return
+        if (single && selected.add(uri)) selectionChanged()
     }
 
     private fun toggle(uri: Uri) {
@@ -1132,27 +1162,28 @@ class MainActivity : AppCompatActivity() {
     private fun usableLine(l: FloatArray?, w: Int, h: Int) = l?.takeIf { val dx = (it[2] - it[0]) * w; val dy = (it[3] - it[1]) * h; dx * dx + dy * dy > 4f }
 
     // One image row. With a line: full effect behind the start's perpendicular, fading linearly to none at the end's.
-    private fun correctRow(src: IntArray, dst: IntArray, off: Int, w: Int, y: Int, h: Int, m: FloatArray, pop: Float, line: FloatArray?) {
-        if (line == null) { for (x in 0 until w) dst[off + x] = shade(src[off + x], m, pop, 1f); return }
-        val ax = line[0] * w; val ay = line[1] * h; val dx = (line[2] - line[0]) * w; val dy = (line[3] - line[1]) * h
+    // One row of len pixels that starts at (xOff, y) of a fw x fh frame; the gradient is placed in that frame.
+    private fun correctRow(src: IntArray, dst: IntArray, off: Int, len: Int, xOff: Int, y: Int, fw: Int, fh: Int, m: FloatArray, pop: Float, line: FloatArray?) {
+        if (line == null) { for (x in 0 until len) dst[off + x] = shade(src[off + x], m, pop, 1f); return }
+        val ax = line[0] * fw; val ay = line[1] * fh; val dx = (line[2] - line[0]) * fw; val dy = (line[3] - line[1]) * fh
         val l2 = dx * dx + dy * dy
         val kind = line.getOrElse(4) { 0f }
         if (kind != 0f) {  // circle around the start point, radius to the end point
             val inv = 1f / sqrt(l2); val yy = y + .5f - ay
-            for (x in 0 until w) {
-                val xx = x + .5f - ax; val r = sqrt(xx * xx + yy * yy) * inv
+            for (x in 0 until len) {
+                val xx = xOff + x + .5f - ax; val r = sqrt(xx * xx + yy * yy) * inv
                 dst[off + x] = shade(src[off + x], m, pop, if (kind == 1f) 1f - r else r)
             }
             return
         }
-        val t0 = ((.5f - ax) * dx + (y + .5f - ay) * dy) / l2; val dt = dx / l2
-        for (x in 0 until w) dst[off + x] = shade(src[off + x], m, pop, 1f - (t0 + x * dt))
+        val t0 = ((xOff + .5f - ax) * dx + (y + .5f - ay) * dy) / l2; val dt = dx / l2
+        for (x in 0 until len) dst[off + x] = shade(src[off + x], m, pop, 1f - (t0 + x * dt))
     }
 
     private fun correct(px: IntArray, w: Int, h: Int, s: FloatArray, line: FloatArray?): IntArray {
         val m = matrix(s); val pop = s[6] / 100f; val l = usableLine(line, w, h)
         val out = IntArray(px.size)
-        for (y in 0 until h) correctRow(px, out, y * w, w, y, h, m, pop, l)
+        for (y in 0 until h) correctRow(px, out, y * w, w, 0, y, w, h, m, pop, l)
         return out
     }
 
@@ -1173,6 +1204,29 @@ class MainActivity : AppCompatActivity() {
         return if (rot == 180) Triple(out, w, h) else Triple(out, h, w)
     }
 
+    // The picture turned freely about its centre, in the same frame; the corners that come free are black.
+    private fun straighten(b: Bitmap, angle: Float): Bitmap = if (angle == 0f) b else Bitmap.createBitmap(b.width, b.height, Bitmap.Config.ARGB_8888).also {
+        Canvas(it).apply { drawColor(Color.BLACK); drawBitmap(b, Matrix().apply { postRotate(angle, b.width / 2f, b.height / 2f) }, Paint(Paint.FILTER_BITMAP_FLAG)) }
+    }
+
+    // Shrinks a crop about its centre until it lies inside the picture turned by angle, so no empty corners show.
+    private fun fitCrop(c: FloatArray, angle: Float, w: Int, h: Int): FloatArray {
+        if (angle == 0f || w == 0 || h == 0) return c
+        val a = Math.toRadians(-angle.toDouble()); val cs = kotlin.math.cos(a).toFloat(); val sn = kotlin.math.sin(a).toFloat()
+        val inside = { x: Float, y: Float ->
+            val px = (x - .5f) * w; val py = (y - .5f) * h
+            abs(px * cs - py * sn) <= w / 2f - 1.5f && abs(px * sn + py * cs) <= h / 2f - 1.5f
+        }
+        var cx = (c[0] + c[2]) / 2; var cy = (c[1] + c[3]) / 2
+        if (!inside(cx, cy)) { cx = .5f; cy = .5f }
+        val hw = (c[2] - c[0]) / 2; val hh = (c[3] - c[1]) / 2
+        val fits = { k: Float -> listOf(-1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f).all { (sx, sy) -> inside(cx + sx * hw * k, cy + sy * hh * k) } }
+        if (fits(1f)) return c
+        var lo = 0f; var hi = 1f
+        repeat(24) { val mid = (lo + hi) / 2; if (fits(mid)) lo = mid else hi = mid }
+        return floatArrayOf(cx - hw * lo, cy - hh * lo, cx + hw * lo, cy + hh * lo)
+    }
+
     private fun cropBox(c: FloatArray, w: Int, h: Int): IntArray {
         val x0 = (c[0] * w).toInt().coerceIn(0, w - 1); val y0 = (c[1] * h).toInt().coerceIn(0, h - 1)
         return intArrayOf(x0, y0, (c[2] * w).toInt().coerceIn(x0 + 1, w), (c[3] * h).toInt().coerceIn(y0 + 1, h))
@@ -1187,14 +1241,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     // A thumbnail as exported: turned, corrected (gradient in turned coordinates) and cropped.
+    // Without settings (s == null) it is the original for comparing: only the quarter turns, not straightened or cropped.
     private fun thumbPixels(t: Thumb, s: FloatArray?, line: FloatArray?, g: Geo?): Triple<IntArray, Int, Int> {
-        val (px, w, h) = turn(t.px, t.w, t.h, g?.rot ?: 0)
-        return cropPx(if (s == null) px else correct(px, w, h, s, line), w, h, g?.crop)
+        var (px, w, h) = turn(t.px, t.w, t.h, g?.rot ?: 0)
+        if (s == null) return Triple(px, w, h)
+        val a = g?.angle ?: 0f
+        if (a != 0f) px = IntArray(w * h).also { straighten(Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888), a).getPixels(it, 0, w, 0, 0, w, h) }
+        return cropPx(correct(px, w, h, s, line), w, h, g?.crop)
     }
 
     private fun settingsFor(uri: Uri) = edits[uri]?.v ?: g
     private fun keyFor(uri: Uri) = (settingsFor(uri).contentHashCode() * 31 + (edits[uri]?.line?.contentHashCode() ?: 0)) * 31 +
-        (geos[uri]?.let { it.rot * 7 + (it.crop?.contentHashCode() ?: 0) } ?: 0)
+        (geos[uri]?.let { it.rot * 7 + (it.crop?.contentHashCode() ?: 0) * 13 + it.angle.hashCode() } ?: 0)
 
     // Live playback: the colour LUT (none while holding for the original) and the file's rotation.
     private fun videoEffects(): List<Effect> {
@@ -1235,11 +1293,15 @@ class MainActivity : AppCompatActivity() {
 
     // Shows corrected or (while holding) original image and histogram, in the single view and full screen.
     private fun display() {
-        val whole = if (holding) srcBmp else outBmp ?: srcBmp
-        val c = shownCrop()
+        val whole = if (holding) turnedBmp ?: srcBmp else outBmp ?: srcBmp
+        val c = if (holding) null else shownCrop()
         val b = if (whole != null && c != null) cropBox(c, whole.width, whole.height).let { (x0, y0, x1, y1) -> Bitmap.createBitmap(whole, x0, y0, x1 - x0, y1 - y0) } else whole
-        val h = if (c != null && b != null) hist(IntArray(b.width * b.height).also { b.getPixels(it, 0, b.width, 0, 0, b.width, b.height) })
-            else if (holding) srcHist else outHist ?: srcHist
+        val pixels = { x: Bitmap -> IntArray(x.width * x.height).also { x.getPixels(it, 0, x.width, 0, 0, x.width, x.height) } }
+        val h = when {
+            holding -> turnedHist ?: turnedBmp?.let { hist(pixels(it)) }?.also { turnedHist = it } ?: srcHist
+            c != null && b != null -> hist(pixels(b))
+            else -> outHist ?: srcHist
+        }
         image.setImageBitmap(b); fullImg.setImageBitmap(b)
         histo.data = h; fullHisto.data = h
         syncOverlay()
@@ -1357,8 +1419,8 @@ class MainActivity : AppCompatActivity() {
         val video = isVideo(uri)
         val fs = ++fileSeq
         val seq = ++frameSeq
-        val rot = geos[uri]?.rot ?: 0
-        geoMode = false; cropOverlay.active = false; geoGroup.visibility = View.GONE; trimRow.visibility = View.GONE
+        val rot = geos[uri]?.rot ?: 0; val angle = geos[uri]?.angle ?: 0f
+        geoMode = false; cropOverlay.active = false; geoGroup.visibility = View.GONE; trimRow.visibility = View.GONE; angleRow.visibility = View.GONE
         fileTitle = nameOf(uri); fileSub = "${cur + 1} of ${shown.size}"
         updateToolbar()
         refreshFileInfo()
@@ -1393,7 +1455,7 @@ class MainActivity : AppCompatActivity() {
                         if (s < 1f) d.setTargetSize((info.size.width * s).toInt(), (info.size.height * s).toInt())
                     }.copy(Bitmap.Config.ARGB_8888, false)
                 }.getOrNull()
-                deliver(seq, bmp, rot)
+                deliver(seq, bmp, rot, angle)
             }
         }
     }
@@ -1414,14 +1476,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Runs on frameExec: extracts pixels + histogram, then hands the new source frame to the UI.
-    private fun deliver(seq: Int, raw: Bitmap?, rot: Int) {
-        val bmp = if (raw == null || rot == 0) raw else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+    private fun deliver(seq: Int, raw: Bitmap?, rot: Int, angle: Float = 0f) {
+        val turned = if (raw == null || rot == 0) raw else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+        val bmp = turned?.let { straighten(it, angle) }
         val px = bmp?.let { IntArray(it.width * it.height).also { a -> it.getPixels(a, 0, it.width, 0, 0, it.width, it.height) } }
         val h = px?.let { hist(it) }
         runOnUiThread {
             if (seq != frameSeq) return@runOnUiThread
             if (bmp == null) { say("Can't open ${fileTitle}"); return@runOnUiThread }
-            baseBmp = raw; srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
+            baseBmp = raw; turnedBmp = turned; turnedHist = null; srcAngle = angle
+            srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
             syncOverlay()
             if (full.isShowing) orientFull()
             render()
@@ -1445,6 +1509,9 @@ class MainActivity : AppCompatActivity() {
         geoMode = on
         cropOverlay.active = on && !video
         cropOverlay.crop = geos[uri]?.crop?.copyOf() ?: floatArrayOf(0f, 0f, 1f, 1f)
+        angleRow.visibility = if (on && !video) View.VISIBLE else View.GONE
+        if (on) { pendingAngle = geos[uri]?.angle ?: 0f; angleSlider.value = pendingAngle.coerceIn(-45f, 45f); angleText.text = "%+.1f°".format(pendingAngle); cropBeforeAngle = null }
+        else if (srcAngle != (geos[uri]?.angle ?: 0f)) ui.post { restraighten() }  // closed without ✓: back to the kept angle
         geoGroup.visibility = if (on) View.VISIBLE else View.GONE
         gradientGroup.visibility = if (on || video) View.GONE else View.VISIBLE
         compareBtn.visibility = if (on) View.GONE else View.VISIBLE
@@ -1452,7 +1519,7 @@ class MainActivity : AppCompatActivity() {
         videoRow.visibility = if (video && !on) View.VISIBLE else View.GONE
         trimRow.visibility = if (video && on) View.VISIBLE else View.GONE
         drawBar.visibility = if (on) View.VISIBLE else View.GONE
-        drawHint.text = if (video) "Drag the ends to trim · ↻ turns 90°" else "Drag a corner or edge to crop · ↻ turns 90°"
+        drawHint.text = if (video) "Drag the ends to trim · ↻ turns 90°" else "Drag the crop · Angle straightens · ↻ turns 90°"
         histo.visibility = if (on) View.GONE else View.VISIBLE
         prevBtn.visibility = if (on || shown.size < 2) View.GONE else View.VISIBLE
         nextBtn.visibility = prevBtn.visibility
@@ -1483,10 +1550,12 @@ class MainActivity : AppCompatActivity() {
             gg.trimEnd = v[1].toLong().takeIf { it < videoDur - 50 } ?: -1
             if (videoPos < trimStart() || videoPos > trimEnd()) { videoPos = trimStart(); loadFrame(true) }
         } else {
-            val c = cropOverlay.crop
+            gg.angle = pendingAngle
+            val c = turnedBmp?.let { fitCrop(cropOverlay.crop, gg.angle, it.width, it.height) } ?: cropOverlay.crop
             gg.crop = if (c[0] < .005f && c[1] < .005f && c[2] > .995f && c[3] > .995f) null else c.copyOf()
         }
         if (!gg.isSet) geos.remove(uri)
+        autoSelect()
         setGeoMode(false)
     }
 
@@ -1506,9 +1575,27 @@ class MainActivity : AppCompatActivity() {
         gg.crop = gg.crop?.let(::turnCrop)
         if (geoMode && videoOf[uri] != true) cropOverlay.crop = turnCrop(cropOverlay.crop)
         edits[uri]?.let { e -> e.line = e.line?.let(::turnLine) }
+        autoSelect()
+        restraighten()
+    }
+
+    private fun currentAngle() = if (geoMode) pendingAngle else geos[shown.getOrNull(cur)]?.angle ?: 0f
+
+    // Rebuilds the preview from the decoded picture with the current quarter turns and angle.
+    private fun restraighten() {
         val raw = baseBmp ?: return
-        val seq = ++frameSeq; val rot = gg.rot
-        frameExec.execute { deliver(seq, raw, rot) }
+        val seq = ++frameSeq; val rot = geos[shown.getOrNull(cur)]?.rot ?: 0; val a = currentAngle()
+        frameExec.execute { if (seq == frameSeq) deliver(seq, raw, rot, a) }
+    }
+
+    // Angle slider: the crop shrinks (from where it was when the drag started) so no empty corners show.
+    private fun setAngle(a: Float) {
+        pendingAngle = a
+        angleText.text = "%+.1f°".format(a)
+        val t = turnedBmp ?: return
+        val from = cropBeforeAngle ?: cropOverlay.crop.copyOf().also { cropBeforeAngle = it }
+        cropOverlay.crop = fitCrop(from, a, t.width, t.height)
+        restraighten()
     }
 
     // ---------- video frames ----------
@@ -1944,19 +2031,36 @@ class MainActivity : AppCompatActivity() {
                     }
                     // The pixels stay upright as decoded; gradient and crop (stored for the turned picture) are turned back,
                     // and the turn is written as EXIF orientation, so no second full-size copy is needed.
-                    val gg = plan[i].third; val rot = gg?.rot ?: 0; val back = (4 - rot / 90) % 4
+                    // A freehand angle needs real pixels turned: only the crop region is drawn, rotated, into a new bitmap.
+                    val gg = plan[i].third; val rot = gg?.rot ?: 0; val back = (4 - rot / 90) % 4; val angle = gg?.angle ?: 0f
                     val w = bmp.width; val h = bmp.height
-                    val row = IntArray(w)
                     val line = usableLine(plan[i].second?.let { times(back, it, ::turnLine) }, w, h)
-                    val box = gg?.crop?.let { cropBox(times(back, it, ::turnCrop), w, h) }
-                    for (y in (box?.get(1) ?: 0) until (box?.get(3) ?: h)) {
-                        bmp.getPixels(row, 0, w, 0, y, w, 1)
-                        correctRow(row, row, 0, w, y, h, m, pop, line)
-                        bmp.setPixels(row, 0, w, 0, y, w, 1)
+                    val (x0, y0, x1, y1) = cropBox(gg?.crop?.let { times(back, it, ::turnCrop) } ?: floatArrayOf(0f, 0f, 1f, 1f), w, h)
+                    val out: Bitmap
+                    if (angle == 0f) {
+                        val row = IntArray(w)
+                        for (y in y0 until y1) {
+                            bmp.getPixels(row, 0, w, 0, y, w, 1)
+                            correctRow(row, row, 0, w, 0, y, w, h, m, pop, line)
+                            bmp.setPixels(row, 0, w, 0, y, w, 1)
+                        }
+                        out = if (x0 == 0 && y0 == 0 && x1 == w && y1 == h) bmp else Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)
+                    } else {
+                        out = Bitmap.createBitmap(x1 - x0, y1 - y0, Bitmap.Config.ARGB_8888)
+                        Canvas(out).apply {
+                            drawColor(Color.BLACK)
+                            drawBitmap(bmp, Matrix().apply { postRotate(angle, w / 2f, h / 2f); postTranslate(-x0.toFloat(), -y0.toFloat()) }, Paint(Paint.FILTER_BITMAP_FLAG))
+                        }
+                        val ow = out.width; val row = IntArray(ow)
+                        for (yy in 0 until out.height) {
+                            out.getPixels(row, 0, ow, 0, yy, ow, 1)
+                            correctRow(row, row, 0, ow, x0, y0 + yy, w, h, m, pop, line)
+                            out.setPixels(row, 0, ow, 0, yy, ow, 1)
+                        }
                     }
-                    val out = box?.let { (x0, y0, x1, y1) -> Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0) } ?: bmp
                     tmp.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-                    out.recycle(); bmp.recycle()
+                    if (out !== bmp) out.recycle()
+                    bmp.recycle()
                     runCatching { // capture date, GPS and camera info, plus the turn
                         val src = runCatching { contentResolver.openInputStream(uri)!!.use { ExifInterface(it) } }.getOrNull()
                         ExifInterface(tmp.absolutePath).apply {

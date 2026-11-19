@@ -177,6 +177,31 @@ class LayoutShots {
         fill(root, false, sel = setOf(0, 1, 3, 4, 7, 10, 12, 13, 17), groupEdit = true); paparazzi.snapshot(root)
     }
 
+    @Test fun singleCrop() {
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        val dp = root.resources.displayMetrics.density
+        root.findViewById<View>(R.id.media).layoutParams.height = (393 * dp).toInt()
+        fill(root, true, drawingShot = false)
+        root.findViewById<View>(R.id.gradientGroup).visibility = View.GONE
+        root.findViewById<View>(R.id.compare).visibility = View.GONE
+        root.findViewById<View>(R.id.histo).visibility = View.GONE
+        listOf(R.id.prev, R.id.next).forEach { root.findViewById<View>(it).visibility = View.GONE }
+        root.findViewById<View>(R.id.drawBar).visibility = View.VISIBLE
+        root.findViewById<TextView>(R.id.drawHint).text = "Drag the crop · Angle straightens · ↻ turns 90°"
+        root.findViewById<View>(R.id.geoGroup).apply {
+            visibility = View.VISIBLE
+            background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF323536.toInt()); cornerRadius = 28 * dp }
+        }
+        root.findViewById<View>(R.id.angleRow).visibility = View.VISIBLE
+        root.findViewById<Slider>(R.id.angleSlider).apply { value = 4.2f; trackActiveTintList = trackInactiveTintList }
+        root.findViewById<TextView>(R.id.angleText).text = "+4.2°"
+        root.findViewById<CropOverlay>(R.id.cropOverlay).apply {
+            imgRect.set(0f, (393 * dp - 393 * dp * 720 / 1280) / 2, 393 * dp, (393 * dp + 393 * dp * 720 / 1280) / 2)
+            active = true; crop = floatArrayOf(.12f, .1f, .86f, .9f)
+        }
+        paparazzi.snapshot(root)
+    }
+
     @Test fun singleVideo() {
         val root = paparazzi.inflate<View>(R.layout.activity_main)
         root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()

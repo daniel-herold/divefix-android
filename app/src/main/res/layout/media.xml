@@ -91,6 +91,17 @@
                     android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone"
                     android:contentDescription="Hold to compare" app:icon="@drawable/ic_compare" />
             </LinearLayout>
+            <LinearLayout android:id="@+id/angleRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:gravity="center_vertical" android:paddingStart="12dp" android:visibility="gone">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Angle"
+                    android:textColor="@android:color/white" android:textAppearance="?attr/textAppearanceLabelLarge" />
+                <com.google.android.material.slider.Slider android:id="@+id/angleSlider" android:layout_width="0dp"
+                    android:layout_height="wrap_content" android:layout_weight="1" android:valueFrom="-45" android:valueTo="45" android:value="0"
+                    android:stepSize="0.1" android:contentDescription="Straighten" app:labelBehavior="gone" app:tickVisible="false" />
+                <TextView android:id="@+id/angleText" android:layout_width="56dp" android:layout_height="wrap_content" android:gravity="end"
+                    android:layout_marginEnd="8dp" android:fontFeatureSettings="tnum" android:textColor="@android:color/white"
+                    android:textAppearance="?attr/textAppearanceBodySmall" android:contentDescription="Tap to reset the angle" />
+            </LinearLayout>
             <LinearLayout android:id="@+id/trimRow" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:gravity="center_vertical" android:paddingStart="8dp" android:visibility="gone">
                 <com.google.android.material.slider.RangeSlider android:id="@+id/trimSlider" android:layout_width="0dp"
