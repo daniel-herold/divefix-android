@@ -92,7 +92,13 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.materialswitch.MaterialSwitch
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Matrix
+import androidx.media3.effect.ScaleAndRotateTransformation
+import com.google.android.material.slider.RangeSlider
 import kotlin.math.abs
+import kotlin.math.roundToLong
 import kotlin.math.hypot
 import kotlin.math.sqrt
 import kotlin.math.roundToInt
@@ -141,8 +147,20 @@ class MainActivity : AppCompatActivity() {
     private var v = g  // what the sliders edit: g in the grid, the shown file's own settings in the single view
     private val edits = HashMap<Uri, Edit>()  // individually edited files
     private val videoOf = HashMap<Uri, Boolean>()
-    private val selected = LinkedHashSet<Uri>()  // multi-select in the grid (long-press)
-    private val selecting get() = selected.isNotEmpty()
+    private val selected = LinkedHashSet<Uri>()  // marked for export (colour in the grid); the others are just included (grey)
+    private var editSelected = false  // grid: sliders change only the selected files
+
+    /** Per-file geometry: quarter turns clockwise, crop (l, t, r, b in 0..1 of the turned picture), video trim in ms (-1 = none). */
+    class Geo(var rot: Int = 0, var crop: FloatArray? = null, var trimStart: Long = -1, var trimEnd: Long = -1) {
+        val isSet get() = rot != 0 || crop != null || trimStart >= 0 || trimEnd >= 0
+        fun copy() = Geo(rot, crop?.copyOf(), trimStart, trimEnd)
+    }
+    private val geos = HashMap<Uri, Geo>()
+    private var geoMode = false
+    private var videoFps = 30f
+    private var baseBmp: Bitmap? = null  // decoded picture or frame before turning
+    private val grey = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+    private val exifClock = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
     private val sliders = arrayOfNulls<Slider>(n)
     private val vals = arrayOfNulls<TextView>(n)
     private val dp by lazy { resources.displayMetrics.density }
@@ -209,6 +227,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gridLm: GridLayoutManager
     private lateinit var adapter: RecyclerView.Adapter<RecyclerView.ViewHolder>
     private lateinit var noMatch: TextView
+    private lateinit var cropOverlay: CropOverlay
+    private lateinit var frameTools: View
+    private lateinit var geoGroup: View
+    private lateinit var trimRow: View
+    private lateinit var trimSlider: RangeSlider
+    private lateinit var trimTime: TextView
+    private lateinit var selectBtn: MaterialButton
+    private lateinit var modeSwitch: MaterialButton
     private lateinit var singleBox: FrameLayout
     private lateinit var surface: SurfaceView
     private lateinit var image: ImageView
@@ -258,13 +284,14 @@ class MainActivity : AppCompatActivity() {
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) addFiles(it) }
     private val cardPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { onCardChosen(it) }
-    private val backToGrid = object : OnBackPressedCallback(false) { override fun handleOnBackPressed() = if (selecting) clearSelection() else exitSingle() }
-    private val applyFx = Runnable { player?.setVideoEffects(if (holding) listOf() else listOf<Effect>(lut(matrix(), v[6] / 100f))) }
+    private val backToGrid = object : OnBackPressedCallback(false) { override fun handleOnBackPressed() = back() }
+    private val applyFx = Runnable { player?.setVideoEffects(videoEffects()) }
     private val ticker = object : Runnable {
         override fun run() {
             val p = player ?: return
             if (!p.playWhenReady) return
             videoPos = p.currentPosition
+            if (videoPos >= trimEnd()) { pause(); return }  // playback stops at the trim end
             timeline.value = videoPos.toFloat().coerceIn(timeline.valueFrom, timeline.valueTo); timeTv.text = times()
             ui.postDelayed(this, 200)
         }
@@ -286,14 +313,20 @@ class MainActivity : AppCompatActivity() {
                 3 -> removeCurrent()
                 4 -> setFiles(listOf())
                 5 -> { selected.addAll(shown); selectionChanged() }
-                6 -> removeSelected()
+                6 -> removeUnselected()
+                10 -> { selected.removeAll(shown.toSet()); selectionChanged() }
+                11 -> setGeoMode(!geoMode)
                 7 -> showHelp()
                 9 -> showSortSheet()
                 8 -> showAbout()
             }
             true
         }
-        toolbar.setNavigationOnClickListener { if (selecting) clearSelection() else exitSingle() }
+        toolbar.setNavigationOnClickListener { back() }
+        selectBtn = MaterialButton(this).apply {  // single view: grey "Select" or accent "Selected"
+            setOnClickListener { shown.getOrNull(cur)?.let { toggle(it) } }
+            insetTop = 0; insetBottom = 0; minHeight = (36 * dp).toInt(); iconPadding = (4 * dp).toInt()
+        }
         findViewById<View>(R.id.emptyAdd).setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) }
         emptyBox = findViewById(R.id.empty)
         addMore = findViewById<View>(R.id.addMore).apply { setOnClickListener { filePicker.launch(arrayOf("image/*", "video/*")) } }
@@ -309,7 +342,7 @@ class MainActivity : AppCompatActivity() {
                 } else GridViews.cell(this@MainActivity).apply {
                     val gap = (1 * dp).toInt()
                     layoutParams = RecyclerView.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { setMargins(gap, gap, gap, gap) }
-                    setOnClickListener { (tag as? Uri)?.let { if (selecting) toggle(it) else { cur = shown.indexOf(it); enterSingle() } } }
+                    setOnClickListener { (tag as? Uri)?.let { cur = shown.indexOf(it); enterSingle() } }  // tap opens, long-press selects
                     setOnLongClickListener { (tag as? Uri)?.let { toggle(it) }; true }
                 }
                 return object : RecyclerView.ViewHolder(v) {}
@@ -369,6 +402,27 @@ class MainActivity : AppCompatActivity() {
         videoRow = findViewById(R.id.videoRow)
         playBtn = findViewById<MaterialButton>(R.id.play).apply { setOnClickListener { if (player?.playWhenReady == true) pause() else play() } }
         timeTv = findViewById(R.id.time)
+        cropOverlay = findViewById(R.id.cropOverlay)
+        frameTools = findViewById(R.id.frameTools)
+        geoGroup = findViewById(R.id.geoGroup)
+        trimRow = findViewById(R.id.trimRow)
+        trimTime = findViewById(R.id.trimTime)
+        findViewById<View>(R.id.frameBack).setOnClickListener { stepFrame(-1) }
+        findViewById<View>(R.id.frameFwd).setOnClickListener { stepFrame(1) }
+        findViewById<View>(R.id.saveFrame).setOnClickListener { saveFrame() }
+        findViewById<View>(R.id.geoRotate).setOnClickListener { turnCurrent() }
+        findViewById<View>(R.id.geoSave).setOnClickListener { commitGeo() }
+        findViewById<View>(R.id.geoDiscard).setOnClickListener { resetGeo() }
+        trimSlider = findViewById<RangeSlider>(R.id.trimSlider).apply {
+            addOnChangeListener { sl, _, fromUser ->  // the dragged end shows its frame
+                if (!fromUser) return@addOnChangeListener
+                videoPos = sl.values[sl.activeThumbIndex.coerceIn(0, 1)].toLong(); updateTrimText(); loadFrame(false)
+            }
+            addOnSliderTouchListener(object : RangeSlider.OnSliderTouchListener {
+                override fun onStartTrackingTouch(slider: RangeSlider) {}
+                override fun onStopTrackingTouch(slider: RangeSlider) { loadFrame(true) }
+            })
+        }
         timeline = findViewById<Slider>(R.id.timeline).apply {
             addOnChangeListener { _, value, fromUser ->
                 if (!fromUser) return@addOnChangeListener
@@ -428,6 +482,7 @@ class MainActivity : AppCompatActivity() {
         modeTitle = findViewById(R.id.modeTitle)
         modeSub = findViewById(R.id.modeSub)
         modeReset = findViewById<View>(R.id.modeReset).apply { setOnClickListener { resetIndividual() } }
+        modeSwitch = findViewById<MaterialButton>(R.id.modeSwitch).apply { setOnClickListener { editSelected = !editSelected; selectTarget() } }
 
         // ---------- presets ----------
         presets = JSONObject(prefs.getString("presets", null) ?: defaults)
@@ -563,7 +618,10 @@ class MainActivity : AppCompatActivity() {
     private fun showHelp() {
         val sections = listOf(
             "What DiveFix does" to "Water swallows red light first, so dive photos and videos turn blue-green. DiveFix brings the colours back with a few simple settings and saves corrected copies. Your originals are never changed, and everything runs offline on your phone.",
-            "All files or individual" to "In the grid, the settings apply to all files. Open a file, or long-press to select several, and changes apply only to those: they become individual (✱) and later grid changes skip them. Reset returns them to the settings for all files.",
+            "Your set and what gets saved" to "Everything you add is in your set and shown in the grid. Selected files are in colour, the others grey. Long-press a thumbnail, or use Select in the single view, to switch. Correct saves the selected files the grid shows; in the single view it saves just that file.",
+            "All files or individual" to "In the grid, the settings apply to all files (or only to the selected ones with Edit selected). In the single view, changes apply only to that file: it becomes individual (✱) and later grid changes skip it. Reset returns it to the settings for all files.",
+            "Crop, trim and rotate" to "Use the crop (photos) or scissors (videos) button at the top of the single view. Drag the frame or the trim ends, ↻ turns by 90°, ✓ keeps, ✕ undoes. These only affect the saved copy.",
+            "Photos from videos" to "Pause a video, step frame by frame with the arrow buttons and tap the camera to save that frame as a new photo in DCIM/DiveFix/Frames. It keeps the video's time, is added to your set as selected and can be corrected like any photo.",
             "Presets" to "Shallow, Medium and Deep are starting points for typical depths. Save your own with + Save preset; long-press a preset to update, rename or delete it.",
             "Gradients (photos)" to "Limit the correction to part of a photo. Line: full strength at ● fading to none at ○. Circles: drag from the centre outwards; one keeps the effect inside the circle, the other outside. You can start outside the photo. Only one gradient per photo: drawing a new one replaces it.",
             "Saving" to "Phone saves to DCIM/DiveFix, where your gallery shows it. Card saves to a DiveFix folder on the camera's card. Copies get _fix in the name, and correcting a file again replaces its earlier copy. Capture date and location are kept.",
@@ -630,35 +688,36 @@ class MainActivity : AppCompatActivity() {
     // Replaces the selection (used for "Clear selection").
     private fun setFiles(list: List<Uri>) {
         if (running) { say("Wait for the current batch to finish first"); return }
-        files = listOf(); edits.clear(); selected.clear(); meta.clear()
+        files = listOf(); edits.clear(); selected.clear(); meta.clear(); geos.clear()
         addFiles(list)
     }
 
-    // Adds files to the selection, skipping ones that are already in it.
-    private fun addFiles(list: List<Uri>) {
+    // Adds files to the set (grey until selected), skipping ones that are already in it.
+    private fun addFiles(list: List<Uri>, select: Boolean = false) {
         if (running) { say("Wait for the current batch to finish first"); return }
         val known = files.toHashSet()
         val added = list.filter { known.add(it) }
         added.forEach { videoOf[it] = isVideo(it) }
         val wasEmpty = files.isEmpty()
         files = files + added
-        if (single) exitSingle()
+        if (select) selected.addAll(added)
+        if (single) { shown = shown + added; rebuild(keepOrder = true); scanMeta(added); return }  // stay on the file being viewed
         rebuild()
         updateMode()
         if (wasEmpty) grid.scrollToPosition(0) else if (added.isNotEmpty()) items.indexOf(added.last()).takeIf { it >= 0 }?.let { grid.smoothScrollToPosition(it) }
         scanMeta(added)
-        if (added.size < list.size) say("${list.size - added.size} already selected, skipped")
+        if (added.size < list.size) say("${list.size - added.size} already in the set, skipped")
     }
 
     private fun updateCount() {
-        val target = if (selecting) selected.size else shown.size  // Correct saves what is shown, or just the selection
-        go.text = if (target == 0) "Correct" else "Correct $target"
+        val target = exportTargets().size
+        go.text = when { single -> "Correct this"; target == 0 -> "Correct"; else -> "Correct $target" }
         go.isEnabled = target > 0 && !running
         emptyBox.visibility = if (files.isEmpty()) View.VISIBLE else View.GONE
         grid.visibility = if (shown.isEmpty()) View.GONE else View.VISIBLE
         noMatch.visibility = if (files.isNotEmpty() && shown.isEmpty() && !single) View.VISIBLE else View.GONE
         noMatch.text = "No ${listOf("", "raw", "saved", "individually edited")[filter]} files. Change the filter to see the others."
-        addMore.visibility = if (files.isNotEmpty() && !single && !running && !selecting) View.VISIBLE else View.GONE
+        addMore.visibility = if (files.isNotEmpty() && !single && !running) View.VISIBLE else View.GONE
         gridCompare.visibility = if (files.isNotEmpty() && !single) View.VISIBLE else View.GONE
         updateToolbar()
     }
@@ -675,26 +734,35 @@ class MainActivity : AppCompatActivity() {
             toolbar.setNavigationIcon(R.drawable.ic_arrow_back)
             toolbar.navigationContentDescription = "Back to grid"
             toolbar.title = fileTitle; toolbar.subtitle = fileSub
-            menu.add(0, 3, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-        } else if (selecting) {
-            toolbar.setNavigationIcon(R.drawable.ic_close)
-            toolbar.navigationContentDescription = "End selection"
-            toolbar.title = "${selected.size} selected"; toolbar.subtitle = null
-            menu.add(0, 6, 0, "Remove").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-            if (selected.size < shown.size) menu.add(0, 5, 0, "Select all")
+            val uri = shown.getOrNull(cur)
+            val video = uri != null && videoOf[uri] == true
+            menu.add(0, 11, 0, if (video) "Trim and rotate" else "Crop and rotate").apply {  // accent when this file is cropped, trimmed or turned
+                setIcon(if (video) R.drawable.ic_trim else R.drawable.ic_crop); setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                icon?.mutate()?.setTint(MaterialColors.getColor(toolbar, if (geos[uri]?.isSet == true || geoMode) com.google.android.material.R.attr.colorPrimary
+                    else com.google.android.material.R.attr.colorOnSurfaceVariant))
+            }
+            (selectBtn.parent as? ViewGroup)?.removeView(selectBtn)
+            menu.add(0, 12, 1, "Select").apply { actionView = selectBtn; setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS) }
+            updateSelectBtn()
+            menu.add(0, 3, 2, "Remove from set")
         } else {
             toolbar.navigationIcon = null
             toolbar.title = "DiveFix"
-            toolbar.subtitle = if (files.isEmpty()) null else counts() + when {
+            toolbar.subtitle = if (files.isEmpty()) null else "${selected.size} of ${files.size} selected · " + counts() + when {
                 files.any { !meta.containsKey(it) } -> " · reading dates…"
                 filter != 0 -> " · ${shown.size} ${listOf("", "raw", "saved", "individual")[filter]} shown"
                 else -> ""
             }
-            if (files.isNotEmpty()) menu.add(0, 9, 0, "Sort and filter").apply {  // the icon lights up while a filter is on
-                setIcon(R.drawable.ic_filter); setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-                icon?.mutate()?.setTint(MaterialColors.getColor(toolbar, if (filter != 0) com.google.android.material.R.attr.colorPrimary else com.google.android.material.R.attr.colorOnSurfaceVariant))
+            if (files.isNotEmpty()) {
+                menu.add(0, 9, 0, "Sort and filter").apply {  // the icon lights up while a filter is on
+                    setIcon(R.drawable.ic_filter); setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                    icon?.mutate()?.setTint(MaterialColors.getColor(toolbar, if (filter != 0) com.google.android.material.R.attr.colorPrimary else com.google.android.material.R.attr.colorOnSurfaceVariant))
+                }
+                if (shown.any { it !in selected }) menu.add(0, 5, 1, "Select all")
+                if (shown.any { it in selected }) menu.add(0, 10, 1, "Unselect all")
+                if (files.any { it !in selected }) menu.add(0, 6, 2, "Remove unselected from set")
+                menu.add(0, 4, 2, "Clear set")
             }
-            if (files.isNotEmpty()) menu.add(0, 4, 2, "Clear selection")
         }
         menu.add(0, 2, 3, "Camera card folder…")
         menu.add(0, 7, 4, "Help")
@@ -704,7 +772,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showMode() {
         singleBox.visibility = if (single) View.VISIBLE else View.GONE
-        backToGrid.isEnabled = single || selecting
+        backToGrid.isEnabled = single
         updateCount()
     }
 
@@ -713,7 +781,7 @@ class MainActivity : AppCompatActivity() {
         val uri = shown.getOrNull(cur)
         v = when {
             single && uri != null -> edits[uri]?.v ?: g.copyOf()
-            selecting -> settingsFor(selected.first()).copyOf()  // the sliders start from the first selected file
+            editSelected && selected.isNotEmpty() -> settingsFor(selected.first()).copyOf()  // the sliders start from the first selected file
             else -> g
         }
         for (i in 0 until n) setSlider(i)
@@ -728,36 +796,58 @@ class MainActivity : AppCompatActivity() {
         if (!edits.containsKey(uri)) { edits[uri] = Edit(v); updateMode() }
     }
 
+    // Back closes a tool first, then the single view.
+    private fun back() {
+        when {
+            geoMode -> setGeoMode(false)
+            drawMode -> setDrawMode(false)
+            single -> exitSingle()
+        }
+    }
+
     private fun toggle(uri: Uri) {
         if (running) return
         if (!selected.remove(uri)) selected.add(uri)
         selectionChanged()
     }
 
-    private fun clearSelection() { selected.clear(); selectionChanged() }
-
     private fun selectionChanged() {
-        backToGrid.isEnabled = single || selecting
-        selectTarget()
+        if (selected.isEmpty()) editSelected = false
+        if (!single) selectTarget()
         updateCount()
-        for (k in 0 until grid.childCount) (grid.getChildAt(k) as? FrameLayout)?.let { c -> (c.tag as? Uri)?.let { bindCell(c, it) } }
+        updateMode()
+        updateSelectBtn()
+        for (k in 0 until grid.childCount) grid.getChildAt(k).let { c -> (c.tag as? Uri)?.let { bindCell(c as FrameLayout, it) }; (c.tag as? Dive)?.let { bindHeader(c as LinearLayout, it) } }
     }
 
-    private fun removeSelected() {
+    private fun updateSelectBtn() {
+        val on = shown.getOrNull(cur)?.let { it in selected } == true
+        val color = { attr: Int -> MaterialColors.getColor(toolbar, attr) }
+        selectBtn.text = if (on) "Selected" else "Select"
+        selectBtn.icon = if (on) getDrawable(R.drawable.ic_check) else null
+        selectBtn.backgroundTintList = ColorStateList.valueOf(color(if (on) com.google.android.material.R.attr.colorPrimary else com.google.android.material.R.attr.colorSurfaceContainerHighest))
+        val fg = color(if (on) com.google.android.material.R.attr.colorOnPrimary else com.google.android.material.R.attr.colorOnSurface)
+        selectBtn.setTextColor(fg); selectBtn.iconTint = ColorStateList.valueOf(fg)
+        selectBtn.contentDescription = if (on) "Selected for export. Tap to unselect." else "Not selected. Tap to select for export."
+    }
+
+    private fun removeUnselected() {
         if (running) return
-        val n = selected.size
-        files = files.filter { it !in selected }
-        selected.forEach { edits.remove(it) }
-        selected.clear()
+        val gone = files.filter { it !in selected }
+        files = files.filter { it in selected }
+        gone.forEach { edits.remove(it); geos.remove(it) }
         cur = 0
         rebuild()
         selectionChanged()
-        say("$n removed from the list")
+        say("${gone.size} removed from the set")
     }
+
+    // The files Correct will save: in the single view the one shown, in the grid the selected ones it shows.
+    private fun exportTargets() = if (single) listOfNotNull(shown.getOrNull(cur)) else shown.filter { it in selected }
 
     // In selection mode a slider or preset change sets those values on every selected file, making each individual.
     private fun spread(only: Int?) {
-        if (single || !selecting) return
+        if (single || !editSelected || selected.isEmpty()) return
         for (u in selected) {
             val e = edits.getOrPut(u) { Edit(g.copyOf()) }
             if (only != null) e.v[only] = v[only] else v.copyInto(e.v)
@@ -766,7 +856,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetIndividual() {
-        if (!single && selecting) {
+        if (!single && editSelected) {
             val n = selected.count { edits.remove(it) != null }
             selectTarget(); render()
             say("$n file${if (n == 1) "" else "s"} use the settings for all files again")
@@ -785,7 +875,7 @@ class MainActivity : AppCompatActivity() {
         val uri = shown.getOrNull(cur)
         val one = single && uri != null
         val e = if (one) edits[uri] else null
-        val group = !single && selecting
+        val group = !single && editSelected && selected.isNotEmpty()
         val bg: Int; val fg: Int; val sub: Int
         if (group) {
             bg = MaterialColors.getColor(modeBar, com.google.android.material.R.attr.colorPrimaryContainer)
@@ -816,10 +906,12 @@ class MainActivity : AppCompatActivity() {
         modeIcon.imageTintList = ColorStateList.valueOf(fg)
         modeTitle.setTextColor(fg); modeSub.setTextColor(sub)
         modeReset.visibility = if (e != null || (group && selected.any { edits.containsKey(it) })) View.VISIBLE else View.GONE
+        modeSwitch.visibility = if (!single && selected.isNotEmpty()) View.VISIBLE else View.GONE
+        modeSwitch.text = if (group) "Edit all" else "Edit selected"
+        modeSwitch.setTextColor(fg)
     }
 
     private fun enterSingle() {
-        selected.clear()
         single = true
         showMode()
         loadPreview()
@@ -871,15 +963,19 @@ class MainActivity : AppCompatActivity() {
         val b = srcBmp ?: return
         val w = image.width.toFloat(); val h = image.height.toFloat()
         if (w == 0f || h == 0f) return
-        val sc = minOf(w / b.width, h / b.height)
-        overlay.imgRect.set((w - b.width * sc) / 2, (h - b.height * sc) / 2, (w + b.width * sc) / 2, (h + b.height * sc) / 2)
-        overlay.invalidate()
+        val c = shownCrop() ?: floatArrayOf(0f, 0f, 1f, 1f)
+        val dw = b.width * (c[2] - c[0]); val dh = b.height * (c[3] - c[1])
+        val sc = minOf(w / dw, h / dh)
+        val left = (w - dw * sc) / 2 - c[0] * b.width * sc; val top = (h - dh * sc) / 2 - c[1] * b.height * sc  // where the whole picture would sit
+        overlay.imgRect.set(left, top, left + b.width * sc, top + b.height * sc); overlay.invalidate()
+        cropOverlay.imgRect.set(overlay.imgRect); cropOverlay.invalidate()
     }
 
     private fun exitSingle() {
         releasePlayer()
         fileSeq++; frameSeq++
         frameExec.execute { mmr?.release(); mmr = null }
+        if (geoMode) setGeoMode(false)
         single = false
         setDrawMode(false)
         showMode()
@@ -892,7 +988,7 @@ class MainActivity : AppCompatActivity() {
     private fun removeCurrent() {
         if (running || shown.isEmpty()) return
         val gone = shown[cur]
-        edits.remove(gone)
+        edits.remove(gone); geos.remove(gone); selected.remove(gone)
         files = files - gone
         shown = shown - gone; rebuild(keepOrder = true)
         cur = cur.coerceAtMost(shown.size - 1).coerceAtLeast(0)
@@ -1060,8 +1156,52 @@ class MainActivity : AppCompatActivity() {
         return out
     }
 
+    // One more clockwise quarter turn of a point, gradient (x0, y0, x1, y1, kind) or crop (l, t, r, b), all in 0..1.
+    private fun turnLine(l: FloatArray) = floatArrayOf(1f - l[1], l[0], 1f - l[3], l[2], l.getOrElse(4) { 0f })
+    private fun turnCrop(c: FloatArray) = floatArrayOf(1f - c[3], c[0], 1f - c[1], c[2])
+    private fun <T> times(n: Int, x: T, f: (T) -> T): T { var r = x; repeat(n) { r = f(r) }; return r }
+
+    // Pixels turned clockwise by 0, 90, 180 or 270 degrees.
+    private fun turn(px: IntArray, w: Int, h: Int, rot: Int): Triple<IntArray, Int, Int> {
+        if (rot == 0) return Triple(px, w, h)
+        val out = IntArray(px.size)
+        when (rot) {
+            90 -> for (y in 0 until h) for (x in 0 until w) out[x * h + (h - 1 - y)] = px[y * w + x]
+            180 -> for (k in px.indices) out[px.size - 1 - k] = px[k]
+            else -> for (y in 0 until h) for (x in 0 until w) out[(w - 1 - x) * h + y] = px[y * w + x]
+        }
+        return if (rot == 180) Triple(out, w, h) else Triple(out, h, w)
+    }
+
+    private fun cropBox(c: FloatArray, w: Int, h: Int): IntArray {
+        val x0 = (c[0] * w).toInt().coerceIn(0, w - 1); val y0 = (c[1] * h).toInt().coerceIn(0, h - 1)
+        return intArrayOf(x0, y0, (c[2] * w).toInt().coerceIn(x0 + 1, w), (c[3] * h).toInt().coerceIn(y0 + 1, h))
+    }
+
+    private fun cropPx(px: IntArray, w: Int, h: Int, c: FloatArray?): Triple<IntArray, Int, Int> {
+        if (c == null) return Triple(px, w, h)
+        val (x0, y0, x1, y1) = cropBox(c, w, h)
+        val cw = x1 - x0; val out = IntArray(cw * (y1 - y0))
+        for (y in y0 until y1) System.arraycopy(px, y * w + x0, out, (y - y0) * cw, cw)
+        return Triple(out, cw, y1 - y0)
+    }
+
+    // A thumbnail as exported: turned, corrected (gradient in turned coordinates) and cropped.
+    private fun thumbPixels(t: Thumb, s: FloatArray?, line: FloatArray?, g: Geo?): Triple<IntArray, Int, Int> {
+        val (px, w, h) = turn(t.px, t.w, t.h, g?.rot ?: 0)
+        return cropPx(if (s == null) px else correct(px, w, h, s, line), w, h, g?.crop)
+    }
+
     private fun settingsFor(uri: Uri) = edits[uri]?.v ?: g
-    private fun keyFor(uri: Uri) = settingsFor(uri).contentHashCode() * 31 + (edits[uri]?.line?.contentHashCode() ?: 0)
+    private fun keyFor(uri: Uri) = (settingsFor(uri).contentHashCode() * 31 + (edits[uri]?.line?.contentHashCode() ?: 0)) * 31 +
+        (geos[uri]?.let { it.rot * 7 + (it.crop?.contentHashCode() ?: 0) } ?: 0)
+
+    // Live playback: the colour LUT (none while holding for the original) and the file's rotation.
+    private fun videoEffects(): List<Effect> {
+        val rot = geos[shown.getOrNull(cur)]?.rot ?: 0
+        return (if (holding) listOf() else listOf<Effect>(lut(matrix(), v[6] / 100f))) +
+            (if (rot != 0) listOf<Effect>(ScaleAndRotateTransformation.Builder().setRotationDegrees((360 - rot).toFloat()).build()) else listOf())
+    }
 
     private fun lut(m: FloatArray, pop: Float) =
         SingleColorLut.createFromCube(Array(33) { r -> Array(33) { g -> IntArray(33) { b -> fx(r / 32f, g / 32f, b / 32f, m, pop) } } })
@@ -1095,10 +1235,14 @@ class MainActivity : AppCompatActivity() {
 
     // Shows corrected or (while holding) original image and histogram, in the single view and full screen.
     private fun display() {
-        val b = if (holding) srcBmp else outBmp ?: srcBmp
-        val h = if (holding) srcHist else outHist ?: srcHist
+        val whole = if (holding) srcBmp else outBmp ?: srcBmp
+        val c = shownCrop()
+        val b = if (whole != null && c != null) cropBox(c, whole.width, whole.height).let { (x0, y0, x1, y1) -> Bitmap.createBitmap(whole, x0, y0, x1 - x0, y1 - y0) } else whole
+        val h = if (c != null && b != null) hist(IntArray(b.width * b.height).also { b.getPixels(it, 0, b.width, 0, 0, b.width, b.height) })
+            else if (holding) srcHist else outHist ?: srcHist
         image.setImageBitmap(b); fullImg.setImageBitmap(b)
         histo.data = h; fullHisto.data = h
+        syncOverlay()
     }
 
     private fun hold(on: Boolean) {
@@ -1124,8 +1268,9 @@ class MainActivity : AppCompatActivity() {
         if (d.n > 0) parts += "${day.format(d.start)} · ${clock.format(d.start)}–${clock.format(d.end)}"
         parts += "$photos photo${if (photos == 1) "" else "s"}" + if (videos > 0) " · $videos video${if (videos == 1) "" else "s"}" else ""
         if (d.shownHere.size < d.all.size) parts += "${d.shownHere.size} shown"
+        parts += "${d.shownHere.count { it in selected }} selected"
         GridViews.bindHeader(h, if (d.n > 0) "Dive ${d.n}" else "Unknown time", parts.joinToString(" · "),
-            if (d.shownHere.isNotEmpty() && selected.containsAll(d.shownHere)) "Deselect" else "Select")
+            if (d.shownHere.isNotEmpty() && selected.containsAll(d.shownHere)) "Unselect" else "Select")
     }
 
     // Select (or deselect) every shown file of one dive, e.g. to edit or save just that dive.
@@ -1133,7 +1278,6 @@ class MainActivity : AppCompatActivity() {
         if (running) return
         if (selected.containsAll(d.shownHere)) selected.removeAll(d.shownHere.toSet()) else selected.addAll(d.shownHere)
         selectionChanged()
-        adapter.notifyDataSetChanged()
     }
 
     private fun cellFor(uri: Uri) = (0 until grid.childCount).map { grid.getChildAt(it) }.firstOrNull { it.tag == uri } as? FrameLayout
@@ -1142,20 +1286,22 @@ class MainActivity : AppCompatActivity() {
         val img = cell.getChildAt(0) as ImageView
         val where = cell.getChildAt(1) as LinearLayout
         cell.getChildAt(3).visibility = if (edits.containsKey(uri)) View.VISIBLE else View.GONE
-        cell.getChildAt(4).visibility = if (uri in selected) View.VISIBLE else View.GONE
+        cell.getChildAt(4).visibility = View.GONE
+        img.colorFilter = if (uri in selected) null else grey  // included but not selected: grey
+        img.alpha = if (uri in selected) 1f else .55f
         val t = thumbs.get(uri)
         if (t == null) {
             img.setImageBitmap(null); where.visibility = View.GONE; GridViews.bindBottom(cell, null, timeLabel(uri))
             if (loading.add(uri)) {
-                val s = settingsFor(uri).copyOf(); val line = edits[uri]?.line?.copyOf(); val key = keyFor(uri)
+                val s = settingsFor(uri).copyOf(); val line = edits[uri]?.line?.copyOf(); val gg = geos[uri]?.copy(); val key = keyFor(uri)
                 thumbLoader.execute {
-                    val th = loadThumb(uri, s, line, key)
+                    val th = loadThumb(uri, s, line, gg, key)
                     runOnUiThread { loading.remove(uri); thumbs.put(uri, th); cellFor(uri)?.let { bindCell(it, uri) } }
                 }
             }
             return
         }
-        img.setImageBitmap(if (holding) t.original() else t.out)
+        img.setImageBitmap(if (holding && t.w > 0) thumbPixels(t, null, null, geos[uri]).let { (px, w, h) -> Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888) } else t.out)
         val card = cardFiles.containsKey(t.outName)
         where.visibility = if (t.phone || card) View.VISIBLE else View.GONE
         where.getChildAt(0).visibility = if (t.phone) View.VISIBLE else View.GONE
@@ -1164,7 +1310,7 @@ class MainActivity : AppCompatActivity() {
         if (t.key != keyFor(uri)) renderThumbs(listOf(uri), renderSeq)
     }
 
-    private fun loadThumb(uri: Uri, s: FloatArray, line: FloatArray?, key: Int): Thumb {
+    private fun loadThumb(uri: Uri, s: FloatArray, line: FloatArray?, gg: Geo?, key: Int): Thumb {
         val video = isVideo(uri)
         val bmp = (runCatching { contentResolver.loadThumbnail(uri, Size(384, 384), null) }.getOrNull() ?: runCatching {
             if (video) MediaMetadataRetriever().run {
@@ -1182,20 +1328,21 @@ class MainActivity : AppCompatActivity() {
         val phone = runCatching { existing(outName, video) != null }.getOrDefault(false)
         if (bmp == null) return Thumb(IntArray(0), 0, 0, dur, outName, phone, null, key)
         val px = IntArray(bmp.width * bmp.height).also { bmp.getPixels(it, 0, bmp.width, 0, 0, bmp.width, bmp.height) }
-        val out = correct(px, bmp.width, bmp.height, s, line)
-        return Thumb(px, bmp.width, bmp.height, dur, outName, phone, Bitmap.createBitmap(out, bmp.width, bmp.height, Bitmap.Config.ARGB_8888), key)
+        val t = Thumb(px, bmp.width, bmp.height, dur, outName, phone, null, key)
+        t.out = thumbPixels(t, s, line, gg).let { (o, w, h) -> Bitmap.createBitmap(o, w, h, Bitmap.Config.ARGB_8888) }
+        return t
     }
 
     // Re-renders thumbnails whose settings changed; each file uses its own settings, so grid edits skip individual files.
     private fun renderThumbs(list: List<Uri>, seq: Int) {
-        val jobs = list.map { uri -> Triple(uri, settingsFor(uri).copyOf(), edits[uri]?.line?.copyOf()) to keyFor(uri) }
+        val jobs = list.map { uri -> Triple(uri, settingsFor(uri).copyOf(), edits[uri]?.line?.copyOf()) to (geos[uri]?.copy() to keyFor(uri)) }
         thumbRenderer.execute {
-            for ((job, key) in jobs) {
-                val (uri, s, line) = job
+            for ((job, gk) in jobs) {
+                val (uri, s, line) = job; val (gg, key) = gk
                 if (seq != renderSeq) return@execute
                 val t = thumbs.get(uri) ?: continue
                 if (t.key == key || t.w == 0) continue
-                val bmp = Bitmap.createBitmap(correct(t.px, t.w, t.h, s, line), t.w, t.h, Bitmap.Config.ARGB_8888)
+                val bmp = thumbPixels(t, s, line, gg).let { (o, w, h) -> Bitmap.createBitmap(o, w, h, Bitmap.Config.ARGB_8888) }
                 runOnUiThread { if (seq == renderSeq) { t.out = bmp; t.key = key; if (!holding) (cellFor(uri)?.getChildAt(0) as? ImageView)?.setImageBitmap(bmp) } }
             }
         }
@@ -1210,12 +1357,16 @@ class MainActivity : AppCompatActivity() {
         val video = isVideo(uri)
         val fs = ++fileSeq
         val seq = ++frameSeq
+        val rot = geos[uri]?.rot ?: 0
+        geoMode = false; cropOverlay.active = false; geoGroup.visibility = View.GONE; trimRow.visibility = View.GONE
         fileTitle = nameOf(uri); fileSub = "${cur + 1} of ${shown.size}"
         updateToolbar()
         refreshFileInfo()
         prevBtn.visibility = if (shown.size > 1) View.VISIBLE else View.GONE
         nextBtn.visibility = prevBtn.visibility
         videoRow.visibility = if (video) View.VISIBLE else View.GONE
+        frameTools.visibility = videoRow.visibility
+        compareBtn.visibility = View.VISIBLE
         gradientGroup.visibility = if (video) View.GONE else View.VISIBLE  // gradients are for photos
         setDrawMode(false)
         selectTarget()
@@ -1229,6 +1380,8 @@ class MainActivity : AppCompatActivity() {
                 val r = runCatching { MediaMetadataRetriever().apply { setDataSource(this@MainActivity, uri) } }.getOrNull()
                 mmr = r
                 val d = r?.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val frames = r?.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toFloatOrNull() ?: 0f
+                videoFps = if (frames > 0 && d > 0) frames * 1000f / d else 30f
                 runOnUiThread { if (fs == fileSeq) { videoDur = d; timeline.valueTo = maxOf(1f, d.toFloat()); timeTv.text = times(); loadFrame(true) } }
             }
         } else {
@@ -1240,7 +1393,7 @@ class MainActivity : AppCompatActivity() {
                         if (s < 1f) d.setTargetSize((info.size.width * s).toInt(), (info.size.height * s).toInt())
                     }.copy(Bitmap.Config.ARGB_8888, false)
                 }.getOrNull()
-                deliver(seq, bmp)
+                deliver(seq, bmp, rot)
             }
         }
     }
@@ -1248,6 +1401,7 @@ class MainActivity : AppCompatActivity() {
     private fun loadFrame(exact: Boolean) {
         val seq = ++frameSeq
         val pos = videoPos
+        val rot = geos[shown.getOrNull(cur)]?.rot ?: 0
         frameExec.execute {
             if (seq != frameSeq) return@execute
             val bmp = runCatching {
@@ -1255,38 +1409,171 @@ class MainActivity : AppCompatActivity() {
                 (r.getScaledFrameAtTime(pos * 1000, if (exact) MediaMetadataRetriever.OPTION_CLOSEST else MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 1440, 1440)
                     ?: r.getScaledFrameAtTime(pos * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 1440, 1440))!!.copy(Bitmap.Config.ARGB_8888, false)
             }.getOrNull() ?: return@execute
-            deliver(seq, bmp)
+            deliver(seq, bmp, rot)
         }
     }
 
     // Runs on frameExec: extracts pixels + histogram, then hands the new source frame to the UI.
-    private fun deliver(seq: Int, bmp: Bitmap?) {
+    private fun deliver(seq: Int, raw: Bitmap?, rot: Int) {
+        val bmp = if (raw == null || rot == 0) raw else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
         val px = bmp?.let { IntArray(it.width * it.height).also { a -> it.getPixels(a, 0, it.width, 0, 0, it.width, it.height) } }
         val h = px?.let { hist(it) }
         runOnUiThread {
             if (seq != frameSeq) return@runOnUiThread
             if (bmp == null) { say("Can't open ${fileTitle}"); return@runOnUiThread }
-            srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
+            baseBmp = raw; srcBmp = bmp; srcPx = px; srcHist = h; outBmp = null; outHist = null
             syncOverlay()
             if (full.isShowing) orientFull()
             render()
         }
     }
 
-    private fun times() = "%d:%02d / %d:%02d".format(videoPos / 60000, videoPos / 1000 % 60, videoDur / 60000, videoDur / 1000 % 60)
+    private fun times() = "%d:%02d.%02d / %d:%02d".format(videoPos / 60000, videoPos / 1000 % 60, videoPos % 1000 / 10, videoDur / 60000, videoDur / 1000 % 60)
+
+    private fun trimStart() = geos[shown.getOrNull(cur)]?.trimStart?.takeIf { it >= 0 } ?: 0L
+    private fun trimEnd() = geos[shown.getOrNull(cur)]?.trimEnd?.takeIf { it >= 0 } ?: videoDur
+
+    // The crop shown in the preview (none while editing it).
+    private fun shownCrop() = if (geoMode) null else geos[shown.getOrNull(cur)]?.crop
+
+    // ---------- crop, trim and rotate ----------
+
+    private fun setGeoMode(on: Boolean) {
+        val uri = shown.getOrNull(cur) ?: return
+        val video = videoOf[uri] == true
+        if (on) { setDrawMode(false); if (player?.playWhenReady == true) pause() }
+        geoMode = on
+        cropOverlay.active = on && !video
+        cropOverlay.crop = geos[uri]?.crop?.copyOf() ?: floatArrayOf(0f, 0f, 1f, 1f)
+        geoGroup.visibility = if (on) View.VISIBLE else View.GONE
+        gradientGroup.visibility = if (on || video) View.GONE else View.VISIBLE
+        compareBtn.visibility = if (on) View.GONE else View.VISIBLE
+        frameTools.visibility = if (video && !on) View.VISIBLE else View.GONE
+        videoRow.visibility = if (video && !on) View.VISIBLE else View.GONE
+        trimRow.visibility = if (video && on) View.VISIBLE else View.GONE
+        drawBar.visibility = if (on) View.VISIBLE else View.GONE
+        drawHint.text = if (video) "Drag the ends to trim · ↻ turns 90°" else "Drag a corner or edge to crop · ↻ turns 90°"
+        histo.visibility = if (on) View.GONE else View.VISIBLE
+        prevBtn.visibility = if (on || shown.size < 2) View.GONE else View.VISIBLE
+        nextBtn.visibility = prevBtn.visibility
+        val color = { attr: Int -> MaterialColors.getColor(geoGroup, attr) }
+        geoGroup.background = GradientDrawable().apply { setColor(color(com.google.android.material.R.attr.colorSurfaceContainerHighest)); cornerRadius = 28 * dp }
+        if (video && on) {
+            trimSlider.valueTo = maxOf(1f, videoDur.toFloat())
+            trimSlider.values = listOf(trimStart().toFloat(), trimEnd().toFloat().coerceAtLeast(trimStart() + 1f))
+            updateTrimText()
+        }
+        display()
+        updateToolbar()
+    }
+
+    private fun updateTrimText() {
+        val v = trimSlider.values; val a = v[0].toLong(); val b = v[1].toLong()
+        val f = { t: Long -> "%d:%02d".format(t / 60000, t / 1000 % 60) }
+        trimTime.text = "${f(a)}–${f(b)} (${f(b - a)})"
+    }
+
+    // ✓: keep the crop or trim as set (a full frame or full length counts as none).
+    private fun commitGeo() {
+        val uri = shown.getOrNull(cur) ?: return
+        val gg = geos.getOrPut(uri) { Geo() }
+        if (videoOf[uri] == true) {
+            val v = trimSlider.values
+            gg.trimStart = v[0].toLong().takeIf { it > 50 } ?: -1
+            gg.trimEnd = v[1].toLong().takeIf { it < videoDur - 50 } ?: -1
+            if (videoPos < trimStart() || videoPos > trimEnd()) { videoPos = trimStart(); loadFrame(true) }
+        } else {
+            val c = cropOverlay.crop
+            gg.crop = if (c[0] < .005f && c[1] < .005f && c[2] > .995f && c[3] > .995f) null else c.copyOf()
+        }
+        if (!gg.isSet) geos.remove(uri)
+        setGeoMode(false)
+    }
+
+    // ✕: undo crop, trim and rotation for this file.
+    private fun resetGeo() {
+        val uri = shown.getOrNull(cur) ?: return
+        while ((geos[uri]?.rot ?: 0) != 0) turnCurrent()
+        geos.remove(uri)
+        setGeoMode(false)
+    }
+
+    // ↻: turns the file 90° clockwise; its crop and gradient turn with it.
+    private fun turnCurrent() {
+        val uri = shown.getOrNull(cur) ?: return
+        val gg = geos.getOrPut(uri) { Geo() }
+        gg.rot = (gg.rot + 90) % 360
+        gg.crop = gg.crop?.let(::turnCrop)
+        if (geoMode && videoOf[uri] != true) cropOverlay.crop = turnCrop(cropOverlay.crop)
+        edits[uri]?.let { e -> e.line = e.line?.let(::turnLine) }
+        val raw = baseBmp ?: return
+        val seq = ++frameSeq; val rot = gg.rot
+        frameExec.execute { deliver(seq, raw, rot) }
+    }
+
+    // ---------- video frames ----------
+
+    private fun stepFrame(d: Int) {
+        if (player?.playWhenReady == true) pause()
+        val idx = (videoPos * videoFps / 1000f).roundToLong() + d
+        videoPos = (idx * 1000f / videoFps).roundToLong().coerceIn(0L, videoDur)
+        timeline.value = videoPos.toFloat().coerceIn(timeline.valueFrom, timeline.valueTo); timeTv.text = times()
+        loadFrame(true)
+    }
+
+    // Saves the shown frame as a new, uncorrected photo (turned like the video, timestamp = video start + position),
+    // adds it to the set as selected, and offers to open it.
+    private fun saveFrame() {
+        if (player?.playWhenReady == true) pause()
+        val uri = shown.getOrNull(cur) ?: return
+        val pos = videoPos; val rot = geos[uri]?.rot ?: 0
+        val base = (meta[uri]?.name ?: nameOf(uri)).substringBeforeLast('.')
+        val start = meta[uri]?.time ?: -1L
+        frameExec.execute {
+            val result = runCatching {
+                val r = mmr!!
+                var bmp = (r.getFrameAtTime(pos * 1000, MediaMetadataRetriever.OPTION_CLOSEST) ?: r.getFrameAtTime(pos * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC))!!
+                if (rot != 0) bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+                val tmp = File(cacheDir, "frame.jpg")
+                tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                val at = if (start >= 0) start + pos else -1L
+                if (at >= 0) ExifInterface(tmp.absolutePath).apply {
+                    setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifClock.format(at)); setAttribute(ExifInterface.TAG_DATETIME, exifClock.format(at))
+                    setAttribute(ExifInterface.TAG_SUBSEC_TIME_ORIGINAL, "%03d".format(at % 1000)); saveAttributes()
+                }
+                val out = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, "${base}_frame_%d-%02d-%03d.jpg".format(pos / 60000, pos / 1000 % 60, pos % 1000))
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg"); put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/DiveFix/Frames")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    if (at >= 0) put(MediaStore.MediaColumns.DATE_TAKEN, at - TimeZone.getDefault().getOffset(at))
+                })!!
+                contentResolver.openOutputStream(out)!!.use { o -> tmp.inputStream().use { it.copyTo(o) } }
+                contentResolver.update(out, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                tmp.delete()
+                out
+            }
+            runOnUiThread {
+                result.onSuccess { u ->
+                    videoOf[u] = false
+                    addFiles(listOf(u), select = true)
+                    say("Frame saved to DCIM/DiveFix/Frames and selected", "Open") { shown.indexOf(u).takeIf { it >= 0 }?.let { cur = it; loadPreview() } }
+                }.onFailure { say("Couldn't save the frame (${it.message})") }
+            }
+        }
+    }
 
     // ---------- video playback (live correction through the same LUT as the export) ----------
 
     private fun play() {
         if (running) { say("Playback is paused while files are being corrected"); return }
-        if (videoDur > 0 && videoPos >= videoDur - 200) videoPos = 0
+        if (videoPos < trimStart() || videoPos >= trimEnd() - 200) videoPos = trimStart()
         // Always start a fresh player at the current position: resuming a paused one with live colour effects can stall.
         if (player != null) releasePlayer()
         run {
             val p = ExoPlayer.Builder(this).build()
             player = p
             p.setVideoSurfaceView(surface)
-            p.setVideoEffects(listOf<Effect>(lut(matrix(), v[6] / 100f)))
+            p.setVideoEffects(videoEffects())
             p.addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { if (player?.playWhenReady == true) image.visibility = View.INVISIBLE }
                 override fun onVideoSizeChanged(videoSize: VideoSize) { fitSurface(videoSize) }
@@ -1365,7 +1652,7 @@ class MainActivity : AppCompatActivity() {
 
     // Turn the image 90° when its orientation doesn't match the screen's, so it fills the screen without rotating the app.
     private fun orientFull() {
-        val w = fullRoot.width; val h = fullRoot.height; val b = srcBmp ?: return
+        val w = fullRoot.width; val h = fullRoot.height; val b = (fullImg.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap ?: srcBmp ?: return
         if (w == 0 || h == 0) return
         val rotate = (b.width > b.height) != (w > h) && b.width != b.height
         rotBox.layoutParams = FrameLayout.LayoutParams(if (rotate) h else w, if (rotate) w else h, Gravity.CENTER)
@@ -1399,6 +1686,11 @@ class MainActivity : AppCompatActivity() {
     // Capture time as camera wall-clock millis (formatted in UTC, so photos and videos line up). DJI and most phones put it in the
     // file name; otherwise the photo's EXIF, the video's metadata or the file date is used.
     private fun captureTime(u: Uri, name: String, video: Boolean): Long {
+        if (!video) runCatching {
+            val exif = contentResolver.openInputStream(u)!!.use { ExifInterface(it) }
+            val sub = exif.getAttribute(ExifInterface.TAG_SUBSEC_TIME_ORIGINAL)?.take(3)?.padEnd(3, '0')?.toLongOrNull() ?: 0L
+            return exifClock.parse(exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)!!)!!.time + sub
+        }
         Regex("(20\\d{6})[_-]?(\\d{6})").find(name)?.let { m -> runCatching { return wall.parse(m.groupValues[1] + m.groupValues[2])!!.time } }
         val local = { t: Long -> t + TimeZone.getDefault().getOffset(t) }
         if (!video) runCatching {
@@ -1437,7 +1729,7 @@ class MainActivity : AppCompatActivity() {
             2 -> files.filter(pass).sortedBy { meta[it]?.name?.lowercase() ?: "" }
             else -> files.filter(pass).sortedWith(compareBy<Uri>({ time(it) < 0 }, { if (sort == 1) -time(it) else time(it) }))
         }
-        selected.retainAll(shown.toSet())
+        selected.retainAll(files.toSet())
         val grouped = groupDives && sort != 2 && files.all { meta.containsKey(it) }  // group once every date is known
         items = if (!grouped) shown else buildList {
             val order = if (sort == 1) dives.reversed() else dives
@@ -1467,7 +1759,7 @@ class MainActivity : AppCompatActivity() {
         } }
         lateinit var groupSwitch: MaterialSwitch
         box.addView(heading("Show"))
-        box.addView(chipRow(listOf("All", "Raw", "Saved", "Individual ✱"), filter) { filter = it; selected.clear(); rebuild(); selectionChanged() })
+        box.addView(chipRow(listOf("All", "Raw", "Saved", "Individual ✱"), filter) { filter = it; rebuild(); selectionChanged() })
         box.addView(TextView(this).apply {
             text = "Raw: no corrected copy yet · Saved: corrected copy on phone or card"
             setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
@@ -1597,8 +1889,8 @@ class MainActivity : AppCompatActivity() {
         releasePlayer()
         running = true; cancelled = false; saved = 0; failed = 0; lastError = null; batchDest = dest
         destGroup.isEnabled = false; updateCount()
-        batch = if (selecting) shown.filter { it in selected } else shown
-        val plan = batch.map { settingsFor(it).copyOf() to edits[it]?.line?.copyOf() }  // each file with its own settings
+        batch = exportTargets()
+        val plan = batch.map { Triple(settingsFor(it).copyOf(), edits[it]?.line?.copyOf(), geos[it]?.copy()) }  // each file with its own settings
         thread {
             val ok = batchDest == 0 || openCard(true)
             runOnUiThread {
@@ -1629,11 +1921,11 @@ class MainActivity : AppCompatActivity() {
         thread {
             snap.forEach { (_, t) -> t.phone = runCatching { existing(t.outName, t.dur >= 0) != null }.getOrDefault(t.phone) }
             meta.forEach { (u, m) -> m.phone = runCatching { existing(outName(u, m.video), m.video) != null }.getOrDefault(m.phone) }
-            runOnUiThread { rebuild() }
+            runOnUiThread { if (single) rebuild(keepOrder = true) else rebuild() }
         }
     }
 
-    private fun process(i: Int, plan: List<Pair<FloatArray, FloatArray?>>) {
+    private fun process(i: Int, plan: List<Triple<FloatArray, FloatArray?, Geo?>>) {
         if (!running) return
         if (cancelled || i >= batch.size) { finishBatch(); return }
         val m = matrix(plan[i].first); val pop = plan[i].first[6] / 100f
@@ -1650,19 +1942,31 @@ class MainActivity : AppCompatActivity() {
                     val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { d, _, _ ->
                         d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE; d.isMutableRequired = true
                     }
-                    val w = bmp.width
+                    // The pixels stay upright as decoded; gradient and crop (stored for the turned picture) are turned back,
+                    // and the turn is written as EXIF orientation, so no second full-size copy is needed.
+                    val gg = plan[i].third; val rot = gg?.rot ?: 0; val back = (4 - rot / 90) % 4
+                    val w = bmp.width; val h = bmp.height
                     val row = IntArray(w)
-                    val line = usableLine(plan[i].second, w, bmp.height)
-                    for (y in 0 until bmp.height) {
+                    val line = usableLine(plan[i].second?.let { times(back, it, ::turnLine) }, w, h)
+                    val box = gg?.crop?.let { cropBox(times(back, it, ::turnCrop), w, h) }
+                    for (y in (box?.get(1) ?: 0) until (box?.get(3) ?: h)) {
                         bmp.getPixels(row, 0, w, 0, y, w, 1)
-                        correctRow(row, row, 0, w, y, bmp.height, m, pop, line)
+                        correctRow(row, row, 0, w, y, h, m, pop, line)
                         bmp.setPixels(row, 0, w, 0, y, w, 1)
                     }
-                    tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-                    bmp.recycle()
-                    runCatching { // capture date, GPS and camera info; orientation is already applied to the pixels
-                        val src = contentResolver.openInputStream(uri)!!.use { ExifInterface(it) }
-                        ExifInterface(tmp.absolutePath).apply { exifTags.forEach { t -> src.getAttribute(t)?.let { setAttribute(t, it) } }; saveAttributes() }
+                    val out = box?.let { (x0, y0, x1, y1) -> Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0) } ?: bmp
+                    tmp.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                    out.recycle(); bmp.recycle()
+                    runCatching { // capture date, GPS and camera info, plus the turn
+                        val src = runCatching { contentResolver.openInputStream(uri)!!.use { ExifInterface(it) } }.getOrNull()
+                        ExifInterface(tmp.absolutePath).apply {
+                            src?.let { sx -> exifTags.forEach { t -> sx.getAttribute(t)?.let { setAttribute(t, it) } } }
+                            setAttribute(ExifInterface.TAG_ORIENTATION, when (rot) {
+                                90 -> ExifInterface.ORIENTATION_ROTATE_90; 180 -> ExifInterface.ORIENTATION_ROTATE_180
+                                270 -> ExifInterface.ORIENTATION_ROTATE_270; else -> ExifInterface.ORIENTATION_NORMAL
+                            }.toString())
+                            saveAttributes()
+                        }
                     }
                     save(tmp, "$base.jpg", false, null)
                 }
@@ -1675,15 +1979,24 @@ class MainActivity : AppCompatActivity() {
         val tmp = File(cacheDir, "export.mp4").apply { delete() }
         val mr = MediaMetadataRetriever().apply { setDataSource(this@MainActivity, uri) }
         val bitrate = mr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull() ?: 60_000_000
-        val taken = runCatching {
+        val taken0 = runCatching {
             SimpleDateFormat("yyyyMMdd'T'HHmmss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
                 .parse(mr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)!!)!!.time
         }.getOrNull()
         mr.release()
-        // Bake fx() into a 33x33x33 LUT; the GPU interpolates it trilinearly per pixel.
+        val gg = plan[i].third
+        val start = gg?.trimStart?.takeIf { it >= 0 }; val end = gg?.trimEnd?.takeIf { it >= 0 }
+        val taken = taken0?.let { it + (start ?: 0L) }  // a trimmed clip starts later
+        // Bake fx() into a 33x33x33 LUT; the GPU interpolates it trilinearly per pixel. Rotation and trim come after.
         val lut = Array(33) { r -> Array(33) { g -> IntArray(33) { b -> fx(r / 32f, g / 32f, b / 32f, m, pop) } } }
-        val item = EditedMediaItem.Builder(MediaItem.fromUri(uri))
-            .setEffects(Effects(listOf(), listOf<Effect>(SingleColorLut.createFromCube(lut))))
+        val media = MediaItem.Builder().setUri(uri).apply {
+            if (start != null || end != null) setClippingConfiguration(MediaItem.ClippingConfiguration.Builder().apply {
+                start?.let { setStartPositionMs(it) }; end?.let { setEndPositionMs(it) }
+            }.build())
+        }.build()
+        val item = EditedMediaItem.Builder(media)
+            .setEffects(Effects(listOf(), listOf<Effect>(SingleColorLut.createFromCube(lut)) +
+                (if ((gg?.rot ?: 0) != 0) listOf<Effect>(ScaleAndRotateTransformation.Builder().setRotationDegrees((360 - gg!!.rot).toFloat()).build()) else listOf())))
             .build()
         val t = Transformer.Builder(this)
             .setEncoderFactory(DefaultEncoderFactory.Builder(this)

@@ -33,11 +33,17 @@ class LayoutShots {
         p.shader = null; p.color = Color.rgb(200, 120 + seed * 7, 80); c.drawCircle(w * .4f + seed * 9, h * .55f, h * .12f, p)
     }
 
-    private fun fill(root: View, singleView: Boolean, columns: Int = 3, sel: Set<Int> = emptySet(), drawingShot: Boolean = true) {
+    private fun fill(root: View, singleView: Boolean, columns: Int = 3, sel: Set<Int> = emptySet(), drawingShot: Boolean = true, groupEdit: Boolean = false) {
         val ctx = root.context; val dp = ctx.resources.displayMetrics.density
         root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
-            if (singleView) { setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.JPG"; subtitle = "4 of 12 · fixed on phone"; menu.add("Remove").setShowAsAction(2) }
-            else { title = "DiveFix"; subtitle = "18 photos · 4 videos"; menu.add("Sort and filter").setIcon(R.drawable.ic_filter).setShowAsAction(2) }
+            if (singleView) {
+                setNavigationIcon(R.drawable.ic_arrow_back); title = "DJI_20261102_0042_D.JPG"; subtitle = "4 of 12 · fixed on phone"
+                menu.add("Crop and rotate").setIcon(R.drawable.ic_crop).setShowAsAction(2)
+                menu.add("Select").apply { setShowAsAction(2); actionView = com.google.android.material.button.MaterialButton(ctx).apply {
+                    text = "Selected"; setIconResource(R.drawable.ic_check); insetTop = 0; insetBottom = 0; minHeight = (36 * dp).toInt(); iconPadding = (4 * dp).toInt() } }
+                menu.add("Remove from set")
+            }
+            else { title = "DiveFix"; subtitle = "9 of 22 selected · 18 photos · 4 videos"; menu.add("Sort and filter").setIcon(R.drawable.ic_filter).setShowAsAction(2) }
             menu.add("Camera card folder…")
         }
         val grid = root.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.grid)
@@ -62,7 +68,9 @@ class LayoutShots {
                 where.visibility = if (p % 3 == 0) View.VISIBLE else View.GONE; where.getChildAt(1).visibility = if (p % 2 == 0) View.VISIBLE else View.GONE
                 GridViews.bindBottom(cell, if (p == 1 || p == 5) "0:42" else null, "%02d:%02d".format(10 + p / 11, (12 + p * 4) % 60))
                 cell.getChildAt(3).visibility = if (p == 2 || p == 7) View.VISIBLE else View.GONE
-                cell.getChildAt(4).visibility = if (p in sel) View.VISIBLE else View.GONE
+                cell.getChildAt(4).visibility = View.GONE
+                val img = cell.getChildAt(0) as ImageView
+                if (p !in sel) { img.colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) }); img.alpha = .55f }
             }
         }
         root.findViewById<View>(R.id.empty).visibility = View.GONE
@@ -81,27 +89,26 @@ class LayoutShots {
             icon.setImageResource(R.drawable.ic_photos); icon.imageTintList = android.content.res.ColorStateList.valueOf(0xFFE1E3E3.toInt())
             title.text = "All files"; sub.text = "Changes apply to all except 2 individually edited (✱)"
             title.setTextColor(0xFFE1E3E3.toInt()); sub.setTextColor(0xFFA8B0B2.toInt())
-            root.findViewById<View>(R.id.addMore).visibility = if (sel.isEmpty()) View.VISIBLE else View.GONE
+            root.findViewById<View>(R.id.addMore).visibility = View.VISIBLE
             root.findViewById<View>(R.id.gridCompare).apply {
                 visibility = View.VISIBLE
                 (layoutParams as FrameLayout.LayoutParams).marginEnd = (16 * dp).toInt()
             }
-            if (sel.isNotEmpty()) {
-                root.findViewById<MaterialToolbar>(R.id.toolbar).apply {
-                    menu.clear(); setNavigationIcon(R.drawable.ic_close); this.title = "${sel.size} selected"; this.subtitle = null
-                    menu.add("Remove").setShowAsAction(2); menu.add("Select all")
-                }
+            val switch = root.findViewById<com.google.android.material.button.MaterialButton>(R.id.modeSwitch)
+            switch.visibility = View.VISIBLE; switch.text = "Edit selected"
+            if (groupEdit) {  // grid with "Edit selected" on
                 bar.background = android.graphics.drawable.GradientDrawable().apply { setColor(0xFF004F58.toInt()); cornerRadius = 12 * dp }
                 icon.setImageResource(R.drawable.ic_tune); icon.imageTintList = android.content.res.ColorStateList.valueOf(0xFFA2EEFF.toInt())
                 title.text = "Only the ${sel.size} selected"; sub.text = "Each change is set on all selected files and makes them individual (✱)"
                 title.setTextColor(0xFFA2EEFF.toInt()); sub.setTextColor(0xFFA2EEFF.toInt())
+                switch.text = "Edit all"; switch.setTextColor(0xFFA2EEFF.toInt())
             }
         }
         if (singleView) {
             root.findViewById<View>(R.id.single).visibility = View.VISIBLE
             root.findViewById<ImageView>(R.id.image).setImageBitmap(fake(1280, 720, 3))
             root.findViewById<View>(R.id.videoRow).visibility = View.VISIBLE
-            root.findViewById<TextView>(R.id.time).text = "0:12 / 0:42"
+            root.findViewById<TextView>(R.id.time).text = "0:12.48 / 0:42"
             root.findViewById<Slider>(R.id.timeline).apply { valueTo = 42f; value = 12f }
             root.findViewById<View>(R.id.videoRow).visibility = View.GONE
             val primary = android.content.res.ColorStateList.valueOf(0xFF6CCFDD.toInt()); val onPrimary = android.content.res.ColorStateList.valueOf(0xFF00363D.toInt())
@@ -154,20 +161,30 @@ class LayoutShots {
     @Test fun tablet() {
         paparazzi.unsafeUpdateConfig(deviceConfig = DeviceConfig.PIXEL_C)
         val root = paparazzi.inflate<View>(R.layout.activity_main)
-        fill(root, false, 6)
+        fill(root, false, 6, sel = setOf(0, 1, 3, 4, 7, 10, 12, 13, 17))
         paparazzi.snapshot(root)
     }
 
     @Test fun grid() {
         val root = paparazzi.inflate<View>(R.layout.activity_main)
         root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
-        fill(root, false); paparazzi.snapshot(root)
+        fill(root, false, sel = setOf(0, 1, 3, 4, 7, 10, 12, 13, 17)); paparazzi.snapshot(root)
     }
 
     @Test fun selection() {
         val root = paparazzi.inflate<View>(R.layout.activity_main)
         root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
-        fill(root, false, sel = setOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)); paparazzi.snapshot(root)
+        fill(root, false, sel = setOf(0, 1, 3, 4, 7, 10, 12, 13, 17), groupEdit = true); paparazzi.snapshot(root)
+    }
+
+    @Test fun singleVideo() {
+        val root = paparazzi.inflate<View>(R.layout.activity_main)
+        root.findViewById<View>(R.id.media).layoutParams.height = (393 * root.resources.displayMetrics.density).toInt()
+        fill(root, true, drawingShot = false)
+        root.findViewById<View>(R.id.gradientGroup).visibility = View.GONE
+        root.findViewById<View>(R.id.frameTools).visibility = View.VISIBLE
+        root.findViewById<View>(R.id.videoRow).visibility = View.VISIBLE
+        paparazzi.snapshot(root)
     }
 
     @Test fun singleCircle() {
