@@ -468,7 +468,7 @@ class MainActivity : AppCompatActivity() {
         rotBox.setOnTouchListener { view, e ->
             pinch.onTouchEvent(e); taps.onTouchEvent(e)
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { fullHint.visibility = View.GONE; lastX = e.x; lastY = e.y; downX = e.x; downY = e.y; multi = false; ui.postDelayed(holdLater, 180) }
+                MotionEvent.ACTION_DOWN -> { fullHint.visibility = View.GONE; lastX = e.x; lastY = e.y; downX = e.x; downY = e.y; multi = false; hold(true) }  // original right away; panning or pinching switches back
                 MotionEvent.ACTION_POINTER_DOWN -> { multi = true; ui.removeCallbacks(holdLater); hold(false) }
                 MotionEvent.ACTION_MOVE -> if (!multi && e.pointerCount == 1) {
                     if (hypot(e.x - downX, e.y - downY) > slop) { ui.removeCallbacks(holdLater); if (zoom > 1.01f) { hold(false); zoomBy(1f, e.x, e.y, e.x - lastX, e.y - lastY) } }
